@@ -1,0 +1,1 @@
+Terminal ID / Mã Website (vnp_TmnCode): CRA0CZJY Secret Key / Chuỗi bí mật tạo checksum (vnp_HashSecret): 1IPM09NUD6Y16TA3DH6UJ0YMK69B0RA3

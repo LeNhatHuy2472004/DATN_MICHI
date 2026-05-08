@@ -1,0 +1,828 @@
+using System.Security.Claims;
+using System.Text.Json;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.AspNetCore.Mvc;
+using ThienPlan.Api.Data;
+using ThienPlan.Api.Helpers;
+
+namespace ThienPlan.Api.Controllers;
+
+[ApiController]
+[Route("api/auth")]
+public sealed class AuthController(DemoStore store, JwtTokenService jwt) : ControllerBase
+{
+    [HttpPost("login")]
+    public IActionResult Login(LoginRequest request)
+    {
+        var user = store.FindUser(request.Email);
+        if (user is null || user.Password != request.Password || !user.IsActive)
+        {
+            return Unauthorized(new { message = "Email hoặc mật khẩu không đúng." });
+        }
+
+        return Ok(ToAuthResponse(user, jwt.CreateToken(user)));
+    }
+
+    [HttpPost("register")]
+    public IActionResult Register(RegisterRequest request)
+    {
+        lock (store.SyncRoot)
+        {
+            if (store.FindUser(request.Email) is not null)
+            {
+                return Conflict(new { message = "Email đã tồn tại." });
+            }
+
+            var user = new UserRecord(Guid.NewGuid(), request.Email, request.Password, "Customer", request.FullName, true, "Bronze", 0, DateTimeOffset.UtcNow);
+            store.Users.Add(user);
+            store.UserPermissions[user.Id] = [];
+            return Ok(ToAuthResponse(user, jwt.CreateToken(user)));
+        }
+    }
+
+    [HttpGet("me")]
+    public IActionResult Me()
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        var user = Guid.TryParse(userId, out var id) ? store.Users.FirstOrDefault(x => x.Id == id) : store.Users.First();
+        return Ok(ToAuthResponse(user ?? store.Users.First(), user is null ? string.Empty : jwt.CreateToken(user)));
+    }
+
+    private object ToAuthResponse(UserRecord user, string token) => new
+    {
+        accessToken = token,
+        refreshToken = $"refresh-{Guid.NewGuid():N}",
+        user = new
+        {
+            user.Id,
+            user.Email,
+            user.FullName,
+            user.Role,
+            user.MembershipTier,
+            permissions = store.UserPermissions.TryGetValue(user.Id, out var permissions) ? permissions.Order().ToArray() : []
+        }
+    };
+}
+
+[ApiController]
+[Route("api/catalog")]
+public sealed class CatalogController(DemoStore store) : ControllerBase
+{
+    [HttpGet("categories")]
+    public IActionResult Categories() => Ok(store.Categories.OrderBy(x => x.DisplayOrder));
+
+    [HttpGet("products")]
+    public IActionResult Products([FromQuery] string? search, [FromQuery] int? categoryId, [FromQuery] string? color, [FromQuery] string? size)
+    {
+        var query = store.Products.Where(x => x.IsActive);
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            query = query.Where(x => x.Name.Contains(search, StringComparison.OrdinalIgnoreCase) || x.Tags.Any(t => t.Contains(search, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        if (categoryId.HasValue)
+        {
+            query = query.Where(x => x.CategoryId == categoryId);
+        }
+
+        if (!string.IsNullOrWhiteSpace(color))
+        {
+            query = query.Where(x => x.Variants.Any(v => v.Color.Contains(color, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(size))
+        {
+            query = query.Where(x => x.Variants.Any(v => v.Size.Equals(size, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return Ok(query.Select(ProductDto));
+    }
+
+    [HttpGet("products/{slug}")]
+    public IActionResult Product(string slug)
+    {
+        var product = store.Products.FirstOrDefault(x => x.Slug.Equals(slug, StringComparison.OrdinalIgnoreCase));
+        return product is null ? NotFound() : Ok(ProductDto(product));
+    }
+
+    [HttpGet("vouchers")]
+    public IActionResult Vouchers() => Ok(store.Vouchers.Where(x => x.IsActive).OrderBy(x => x.ExpireAt));
+
+    public static object ProductDto(ProductRecord product) => new
+    {
+        product.Id,
+        product.Name,
+        product.Slug,
+        product.Description,
+        product.CategoryId,
+        product.Brand,
+        product.Material,
+        product.Gender,
+        product.BasePrice,
+        product.IsActive,
+        product.Tags,
+        product.ImageUrl,
+        variants = product.Variants.Select(v => new { v.Id, v.Sku, v.Color, v.Size, v.Price, v.StockQty, v.ImageUrl })
+    };
+}
+
+[ApiController]
+[Route("api/cart")]
+public sealed class CartController(DemoStore store) : ControllerBase
+{
+    [HttpGet]
+    public IActionResult Get([FromQuery] Guid? userId, [FromQuery] string? guestToken) => Ok(CartDto(store.GetCart(userId, guestToken)));
+
+    [HttpPost("items")]
+    public IActionResult AddItem(AddCartItemRequest request)
+    {
+        lock (store.SyncRoot)
+        {
+            var variant = store.Products.SelectMany(x => x.Variants).FirstOrDefault(x => x.Id == request.ProductVariantId);
+            if (variant is null)
+            {
+                return NotFound(new { message = "Không tìm thấy biến thể sản phẩm." });
+            }
+
+            if (variant.StockQty < request.Quantity)
+            {
+                return BadRequest(new { message = "Số lượng tồn kho không đủ." });
+            }
+
+            var cart = store.GetCart(request.UserId, request.GuestToken);
+            var item = cart.Items.FirstOrDefault(x => x.ProductVariantId == request.ProductVariantId);
+            if (item is null)
+            {
+                cart.Items.Add(new CartItemRecord(request.ProductVariantId, request.Quantity, variant.Price));
+            }
+            else
+            {
+                cart.Items.Remove(item);
+                cart.Items.Add(item with { Quantity = Math.Min(variant.StockQty, item.Quantity + request.Quantity) });
+            }
+
+            return Ok(CartDto(cart));
+        }
+    }
+
+    [HttpPatch("items/{variantId:guid}")]
+    public IActionResult UpdateItem(Guid variantId, UpdateCartItemRequest request)
+    {
+        lock (store.SyncRoot)
+        {
+            var cart = store.GetCart(request.UserId, request.GuestToken);
+            var item = cart.Items.FirstOrDefault(x => x.ProductVariantId == variantId);
+            if (item is null)
+            {
+                return NotFound();
+            }
+
+            cart.Items.Remove(item);
+            if (request.Quantity > 0)
+            {
+                cart.Items.Add(item with { Quantity = request.Quantity });
+            }
+
+            return Ok(CartDto(cart));
+        }
+    }
+
+    [HttpDelete("items/{variantId:guid}")]
+    public IActionResult RemoveItem(Guid variantId, [FromQuery] Guid? userId, [FromQuery] string? guestToken)
+    {
+        lock (store.SyncRoot)
+        {
+            var cart = store.GetCart(userId, guestToken);
+            cart.Items.RemoveAll(x => x.ProductVariantId == variantId);
+            return Ok(CartDto(cart));
+        }
+    }
+
+    private object CartDto(CartRecord cart)
+    {
+        var items = cart.Items.Select(item =>
+        {
+            var product = store.Products.First(x => x.Variants.Any(v => v.Id == item.ProductVariantId));
+            var variant = product.Variants.First(x => x.Id == item.ProductVariantId);
+            return new
+            {
+                product.Id,
+                product.Name,
+                product.Slug,
+                product.ImageUrl,
+                variantId = variant.Id,
+                variant.Sku,
+                variant.Color,
+                variant.Size,
+                item.Quantity,
+                item.UnitPrice,
+                lineTotal = item.UnitPrice * item.Quantity
+            };
+        }).ToArray();
+
+        return new
+        {
+            cart.Id,
+            cart.UserId,
+            cart.GuestToken,
+            items,
+            subtotal = items.Sum(x => x.lineTotal)
+        };
+    }
+}
+
+[ApiController]
+[Route("api/orders")]
+public sealed class OrdersController(DemoStore store) : ControllerBase
+{
+    [HttpPost]
+    public IActionResult Checkout(CheckoutRequest request)
+    {
+        if (request.GuestInfo is null)
+        {
+            return BadRequest(new { message = "Thiếu thông tin người nhận." });
+        }
+
+        if (string.IsNullOrWhiteSpace(request.GuestInfo.FullName) ||
+            string.IsNullOrWhiteSpace(request.GuestInfo.PhoneNumber) ||
+            string.IsNullOrWhiteSpace(request.ShippingAddress))
+        {
+            return BadRequest(new { message = "Vui lòng nhập đủ họ tên, số điện thoại và địa chỉ nhận hàng." });
+        }
+
+        if (!string.Equals(request.PaymentMethod, "Cash", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(request.PaymentMethod, "VnPay", StringComparison.OrdinalIgnoreCase))
+        {
+            return BadRequest(new { message = "Phương thức thanh toán không hợp lệ." });
+        }
+
+        try
+        {
+            var order = store.CreateOrder(new CreateOrderRequest(
+                request.UserId,
+                request.GuestToken,
+                request.GuestInfo,
+                request.PaymentMethod,
+                request.ShippingMethod,
+                request.ShippingAddress,
+                request.VoucherCode,
+                request.Note));
+            return Ok(order);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+
+    [HttpGet]
+    public IActionResult List([FromQuery] Guid? userId) =>
+        Ok(store.Orders.Where(x => !userId.HasValue || x.UserId == userId).OrderByDescending(x => x.CreatedAt));
+
+    [HttpGet("{code}")]
+    public IActionResult Detail(string code)
+    {
+        var order = store.Orders.FirstOrDefault(x => x.OrderCode.Equals(code, StringComparison.OrdinalIgnoreCase));
+        return order is null ? NotFound() : Ok(order);
+    }
+
+    [HttpGet("{code}/payment-status")]
+    public IActionResult PaymentStatus(string code)
+    {
+        var order = store.Orders.FirstOrDefault(x => x.OrderCode.Equals(code, StringComparison.OrdinalIgnoreCase));
+        return order is null ? NotFound() : Ok(new { order.OrderCode, order.PaymentMethod, order.PaymentStatus, order.OrderStatus });
+    }
+
+    [HttpPost("{id:guid}/returns")]
+    public IActionResult RequestReturn(Guid id, ReturnRequestDto request)
+    {
+        var order = store.Orders.FirstOrDefault(x => x.Id == id);
+        if (order is null)
+        {
+            return NotFound();
+        }
+
+        var record = new ReturnRecord(Guid.NewGuid(), id, request.Reason, "Requested", request.RefundAmount, DateTimeOffset.UtcNow, null, null);
+        lock (store.SyncRoot)
+        {
+            store.Returns.Add(record);
+        }
+
+        return Ok(record);
+    }
+}
+
+[ApiController]
+[Route("api/payments")]
+public sealed class PaymentsController(DemoStore store, IConfiguration configuration) : ControllerBase
+{
+    [HttpPost("cash/confirm")]
+    public IActionResult ConfirmCash(ConfirmCashRequest request)
+    {
+        lock (store.SyncRoot)
+        {
+            var order = store.Orders.FirstOrDefault(x => x.Id == request.OrderId);
+            if (order is null)
+            {
+                return NotFound();
+            }
+
+            order.PaymentStatus = "Paid";
+            order.OrderStatus = "Confirmed";
+            order.History.Add(new StatusHistoryRecord("Unpaid", "Paid", request.StaffName ?? "Staff", DateTimeOffset.UtcNow, "Xác nhận đã thu tiền mặt"));
+            var payment = new PaymentRecord(Guid.NewGuid(), order.Id, "Cash", order.Total, $"CASH-{order.OrderCode}", null, null, "00", "{}", DateTimeOffset.UtcNow, "Paid");
+            store.Payments.Add(payment);
+            return Ok(new { order, payment });
+        }
+    }
+
+    [HttpPost("vnpay/create-url")]
+    public IActionResult CreateVnPayUrl(CreateVnPayUrlRequest request)
+    {
+        var order = store.Orders.FirstOrDefault(x => x.Id == request.OrderId);
+        if (order is null)
+        {
+            return NotFound();
+        }
+
+        var txnRef = $"{order.OrderCode}-{DateTimeOffset.UtcNow:HHmmss}";
+        var vnPay = new VnPayLibrary();
+        vnPay.AddRequestData("vnp_Version", "2.1.0");
+        vnPay.AddRequestData("vnp_Command", "pay");
+        vnPay.AddRequestData("vnp_TmnCode", configuration["VnPay:TmnCode"] ?? "CRA0CZJY");
+        vnPay.AddRequestData("vnp_Amount", ((long)(order.Total * 100)).ToString());
+        vnPay.AddRequestData("vnp_CreateDate", VnPayLibrary.FormatVnPayDate(DateTimeOffset.UtcNow));
+        vnPay.AddRequestData("vnp_CurrCode", "VND");
+        vnPay.AddRequestData("vnp_IpAddr", HttpContext.Connection.RemoteIpAddress?.ToString() ?? "127.0.0.1");
+        vnPay.AddRequestData("vnp_Locale", "vn");
+        vnPay.AddRequestData("vnp_OrderInfo", $"Thanh toan don hang {order.OrderCode}");
+        vnPay.AddRequestData("vnp_OrderType", "other");
+        vnPay.AddRequestData("vnp_ReturnUrl", configuration["VnPay:ReturnUrl"] ?? "http://localhost:5173/payment/vnpay-return");
+        vnPay.AddRequestData("vnp_TxnRef", txnRef);
+
+        var url = vnPay.CreateRequestUrl(configuration["VnPay:Url"] ?? "https://sandbox.vnpayment.vn/paymentv2/vpcpay.html", configuration["VnPay:HashSecret"] ?? string.Empty);
+        return Ok(new { paymentUrl = url, txnRef, order.OrderCode });
+    }
+
+    [HttpGet("vnpay/verify-return")]
+    public IActionResult VerifyReturn()
+    {
+        var query = Request.Query.ToDictionary(x => x.Key, x => x.Value.ToString());
+        var valid = ValidateVnPayQuery(query);
+        var responseCode = query.GetValueOrDefault("vnp_ResponseCode") ?? string.Empty;
+        var txnRef = query.GetValueOrDefault("vnp_TxnRef") ?? string.Empty;
+        var orderCode = txnRef.Split('-').FirstOrDefault() ?? txnRef;
+
+        if (valid && !string.IsNullOrWhiteSpace(orderCode))
+        {
+            lock (store.SyncRoot)
+            {
+                var order = store.Orders.FirstOrDefault(x => x.OrderCode.Equals(orderCode, StringComparison.OrdinalIgnoreCase));
+                if (order is not null)
+                {
+                    if (responseCode == "00")
+                    {
+                        order.PaymentStatus = "Paid";
+                        order.OrderStatus = "Confirmed";
+                        order.History.Add(new StatusHistoryRecord("Pending", "Paid", "VNPAY", DateTimeOffset.UtcNow, "VNPAY return xác nhận thanh toán thành công"));
+                    }
+                    else
+                    {
+                        order.PaymentStatus = "Failed";
+                        order.History.Add(new StatusHistoryRecord("Pending", "Failed", "VNPAY", DateTimeOffset.UtcNow, $"VNPAY return mã lỗi {responseCode}"));
+                    }
+                }
+            }
+        }
+
+        return Ok(new
+        {
+            valid,
+            responseCode,
+            transactionStatus = query.GetValueOrDefault("vnp_TransactionStatus") ?? string.Empty,
+            txnRef,
+            message = valid ? "Chữ ký hợp lệ." : "Chữ ký không hợp lệ."
+        });
+    }
+
+    [HttpPost("vnpay/mark-failed")]
+    public IActionResult MarkVnPayFailed(MarkVnPayFailedRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.OrderCode))
+        {
+            return BadRequest(new { message = "Thiếu mã đơn hàng cần cập nhật thanh toán VNPAY." });
+        }
+
+        lock (store.SyncRoot)
+        {
+            var order = store.Orders.FirstOrDefault(x => x.OrderCode.Equals(request.OrderCode, StringComparison.OrdinalIgnoreCase));
+            if (order is null)
+            {
+                return NotFound();
+            }
+
+            if (order.PaymentStatus != "Paid")
+            {
+                order.PaymentStatus = "Failed";
+                order.History.Add(new StatusHistoryRecord("Pending", "Failed", "VNPAY", DateTimeOffset.UtcNow, string.IsNullOrWhiteSpace(request.Reason) ? "Không nhận được kết quả thanh toán VNPAY." : request.Reason));
+            }
+
+            return Ok(new { order.OrderCode, order.PaymentStatus, order.OrderStatus });
+        }
+    }
+
+    [HttpGet("vnpay/ipn")]
+    public IActionResult Ipn()
+    {
+        var query = Request.Query.ToDictionary(x => x.Key, x => x.Value.ToString());
+        if (!ValidateVnPayQuery(query))
+        {
+            return Ok(new { RspCode = "97", Message = "Invalid signature" });
+        }
+
+        var txnRef = query.GetValueOrDefault("vnp_TxnRef") ?? string.Empty;
+        var orderCode = txnRef.Split('-').FirstOrDefault() ?? txnRef;
+        var order = store.Orders.FirstOrDefault(x => x.OrderCode == orderCode);
+        if (order is null)
+        {
+            return Ok(new { RspCode = "01", Message = "Order not found" });
+        }
+
+        var amount = decimal.TryParse(query.GetValueOrDefault("vnp_Amount"), out var parsedAmount) ? parsedAmount / 100 : 0;
+        if (amount != order.Total)
+        {
+            return Ok(new { RspCode = "04", Message = "Invalid amount" });
+        }
+
+        lock (store.SyncRoot)
+        {
+            if (query.GetValueOrDefault("vnp_ResponseCode") == "00")
+            {
+                order.PaymentStatus = "Paid";
+                order.OrderStatus = "Confirmed";
+            }
+
+            store.Payments.Add(new PaymentRecord(
+                Guid.NewGuid(),
+                order.Id,
+                "VnPay",
+                order.Total,
+                txnRef,
+                query.GetValueOrDefault("vnp_TransactionNo"),
+                query.GetValueOrDefault("vnp_BankCode"),
+                query.GetValueOrDefault("vnp_ResponseCode"),
+                JsonSerializer.Serialize(query),
+                DateTimeOffset.UtcNow,
+                order.PaymentStatus));
+        }
+
+        return Ok(new { RspCode = "00", Message = "Confirm Success" });
+    }
+
+    private bool ValidateVnPayQuery(Dictionary<string, string> query)
+    {
+        var hash = query.GetValueOrDefault("vnp_SecureHash") ?? string.Empty;
+        var vnPay = new VnPayLibrary();
+        foreach (var pair in query)
+        {
+            vnPay.AddResponseData(pair.Key, pair.Value);
+        }
+
+        return vnPay.ValidateSignature(hash, configuration["VnPay:HashSecret"] ?? string.Empty);
+    }
+}
+
+[ApiController]
+[Route("api/admin")]
+public sealed class AdminController(DemoStore store, AppDbContext db, IConfiguration configuration, IWebHostEnvironment env) : ControllerBase
+{
+    private static readonly string[] AllowedImageExt = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"];
+    private const long MaxImageBytes = 5 * 1024 * 1024; // 5 MB
+
+    [HttpPost("upload/image")]
+    [RequestSizeLimit(MaxImageBytes)]
+    public async Task<IActionResult> UploadImage(IFormFile file, [FromQuery] string? folder = "products")
+    {
+        if (file is null || file.Length == 0)
+            return BadRequest(new { message = "Thiếu file ảnh." });
+        if (file.Length > MaxImageBytes)
+            return BadRequest(new { message = "Ảnh tối đa 5MB." });
+
+        var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+        if (!AllowedImageExt.Contains(ext))
+            return BadRequest(new { message = $"Định dạng không hỗ trợ. Cho phép: {string.Join(", ", AllowedImageExt)}." });
+
+        // Restrict folder to a safe whitelist so callers can't write outside assets/.
+        var safeFolder = folder?.Trim('/', '\\').ToLowerInvariant() switch
+        {
+            "products" => "uploads/products",
+            "brand"    => "uploads/brand",
+            _          => "uploads"
+        };
+
+        var assetsRoot = Path.GetFullPath(Path.Combine(env.ContentRootPath, "..", "assets"));
+        var targetDir = Path.Combine(assetsRoot, safeFolder.Replace('/', Path.DirectorySeparatorChar));
+        Directory.CreateDirectory(targetDir);
+
+        var safeName = $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}{ext}";
+        var targetPath = Path.Combine(targetDir, safeName);
+
+        await using (var stream = System.IO.File.Create(targetPath))
+        {
+            await file.CopyToAsync(stream);
+        }
+
+        var url = $"/assets/{safeFolder}/{safeName}";
+        return Ok(new { url, fileName = safeName, folder = safeFolder, size = file.Length });
+    }
+
+    [HttpGet("dashboard")]
+    public IActionResult Dashboard() => Ok(new
+    {
+        revenue = store.Orders.Where(x => x.PaymentStatus == "Paid").Sum(x => x.Total),
+        orderCount = store.Orders.Count,
+        productCount = store.Products.Count,
+        lowStock = store.Products.SelectMany(x => x.Variants).Count(x => x.StockQty <= 10),
+        openChats = store.Conversations.Count(x => x.Status == "Open")
+    });
+
+    [HttpGet("staff")]
+    public IActionResult Staff() => Ok(store.Users.Where(x => x.Role is "Staff" or "Administrator").Select(UserDto));
+
+    [HttpGet("staff/{id:guid}/permissions")]
+    public IActionResult StaffPermissions(Guid id)
+    {
+        var user = store.Users.FirstOrDefault(x => x.Id == id);
+        if (user is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(new
+        {
+            user = UserDto(user),
+            permissions = store.Permissions,
+            granted = store.UserPermissions.TryGetValue(id, out var granted) ? granted.Order().ToArray() : []
+        });
+    }
+
+    [HttpPut("staff/{id:guid}/permissions")]
+    public IActionResult UpdateStaffPermissions(Guid id, UpdatePermissionsRequest request)
+    {
+        lock (store.SyncRoot)
+        {
+            store.UserPermissions[id] = [.. request.PermissionCodes];
+            return Ok(new { userId = id, granted = request.PermissionCodes.Order() });
+        }
+    }
+
+    [HttpPost("products")]
+    public async Task<IActionResult> CreateProduct(CreateProductRequest request)
+    {
+        var imageUrl = string.IsNullOrWhiteSpace(request.ImageUrl) ? "/assets/products/ao-thun.svg" : request.ImageUrl;
+        var product = new ProductRecord(
+            Guid.NewGuid(),
+            request.Name,
+            Slugify(request.Name),
+            request.Description,
+            request.CategoryId,
+            request.Brand,
+            request.Material,
+            request.Gender,
+            request.BasePrice,
+            true,
+            request.Tags,
+            imageUrl,
+            request.Variants.Select(v => new ProductVariantRecord(Guid.NewGuid(), v.Sku, v.Color, v.Size, v.Price, v.StockQty, imageUrl)).ToList());
+
+        db.CatalogProducts.Add(CatalogDatabaseSeeder.ToEntity(product));
+        await db.SaveChangesAsync();
+        store.AddCatalogProduct(product);
+        return Ok(CatalogController.ProductDto(product));
+    }
+
+    [HttpPut("products/{id:guid}")]
+    public async Task<IActionResult> UpdateProduct(Guid id, UpdateProductRequest request)
+    {
+        var entity = await db.CatalogProducts.Include(p => p.Variants).FirstOrDefaultAsync(p => p.Id == id);
+        if (entity is null) return NotFound(new { message = "Không tìm thấy sản phẩm." });
+
+        entity.Name = request.Name;
+        entity.Description = request.Description;
+        entity.CategoryId = request.CategoryId;
+        entity.Brand = request.Brand;
+        entity.Material = request.Material;
+        entity.Gender = request.Gender;
+        entity.BasePrice = request.BasePrice;
+        entity.IsActive = request.IsActive;
+        entity.TagsCsv = string.Join(", ", request.Tags ?? []);
+        entity.ImageUrl = request.ImageUrl ?? "";
+        // Slug stays stable; if name changed enough, admin can delete + recreate.
+
+        // Replace variants wholesale: drop missing ones, upsert provided ones.
+        var keepIds = (request.Variants ?? []).Where(v => v.Id.HasValue).Select(v => v.Id!.Value).ToHashSet();
+        var toRemove = entity.Variants.Where(v => !keepIds.Contains(v.Id)).ToList();
+        foreach (var v in toRemove) db.CatalogProductVariants.Remove(v);
+
+        foreach (var vr in request.Variants ?? [])
+        {
+            var match = vr.Id.HasValue ? entity.Variants.FirstOrDefault(x => x.Id == vr.Id) : null;
+            if (match is null)
+            {
+                entity.Variants.Add(new CatalogProductVariantEntity
+                {
+                    Id = vr.Id ?? Guid.NewGuid(),
+                    ProductId = entity.Id,
+                    Sku = vr.Sku,
+                    Color = vr.Color,
+                    Size = vr.Size,
+                    Price = vr.Price,
+                    StockQty = vr.StockQty,
+                    ImageUrl = vr.ImageUrl ?? entity.ImageUrl
+                });
+            }
+            else
+            {
+                match.Sku = vr.Sku;
+                match.Color = vr.Color;
+                match.Size = vr.Size;
+                match.Price = vr.Price;
+                match.StockQty = vr.StockQty;
+                match.ImageUrl = vr.ImageUrl ?? entity.ImageUrl;
+            }
+        }
+
+        await db.SaveChangesAsync();
+        await CatalogDatabaseSeeder.ReloadStoreAsync(db, store);
+
+        var fresh = store.Products.First(p => p.Id == id);
+        return Ok(CatalogController.ProductDto(fresh));
+    }
+
+    [HttpDelete("products/{id:guid}")]
+    public async Task<IActionResult> DeleteProduct(Guid id)
+    {
+        var entity = await db.CatalogProducts.Include(p => p.Variants).FirstOrDefaultAsync(p => p.Id == id);
+        if (entity is null) return NotFound(new { message = "Không tìm thấy sản phẩm." });
+
+        db.CatalogProductVariants.RemoveRange(entity.Variants);
+        db.CatalogProducts.Remove(entity);
+        await db.SaveChangesAsync();
+        store.RemoveCatalogProduct(id);
+        return Ok(new { id, deleted = true });
+    }
+
+    [HttpGet("orders")]
+    public IActionResult Orders() => Ok(store.Orders.OrderByDescending(x => x.CreatedAt));
+
+    [HttpPatch("orders/{id:guid}/status")]
+    public IActionResult UpdateOrderStatus(Guid id, UpdateOrderStatusRequest request)
+    {
+        lock (store.SyncRoot)
+        {
+            var order = store.Orders.FirstOrDefault(x => x.Id == id);
+            if (order is null)
+            {
+                return NotFound();
+            }
+
+            var from = order.OrderStatus;
+            order.OrderStatus = request.Status;
+            order.History.Add(new StatusHistoryRecord(from, request.Status, request.ChangedBy ?? "Admin", DateTimeOffset.UtcNow, request.Note));
+            return Ok(order);
+        }
+    }
+
+    [HttpGet("vouchers")]
+    public IActionResult Vouchers() => Ok(store.Vouchers.OrderBy(x => x.ExpireAt));
+
+    [HttpPost("vouchers")]
+    public IActionResult CreateVoucher(CreateVoucherRequest request)
+    {
+        var voucher = new VoucherRecord(Guid.NewGuid(), request.Code.ToUpperInvariant(), request.Name, request.Type, request.Value, request.MaxDiscount, request.MinOrderAmount, request.Quantity, 0, request.ApplicableTier, true, request.StartAt, request.ExpireAt);
+        lock (store.SyncRoot)
+        {
+            store.Vouchers.Add(voucher);
+        }
+
+        return Ok(voucher);
+    }
+
+    [HttpPost("vouchers/{id:guid}/expire")]
+    public IActionResult ExpireVoucher(Guid id)
+    {
+        var voucher = store.Vouchers.FirstOrDefault(x => x.Id == id);
+        if (voucher is null)
+        {
+            return NotFound();
+        }
+
+        voucher.IsActive = false;
+        return Ok(voucher);
+    }
+
+    [HttpGet("_health/features")]
+    public async Task<IActionResult> FeatureHealth() => Ok(new[]
+    {
+        new { code = "permissions.seeded", ok = store.Permissions.Count >= 25, detail = $"{store.Permissions.Count} permissions đã seed." },
+        new { code = "roles.seeded", ok = new[] { "Administrator", "Staff", "Customer" }.All(role => store.Users.Any(x => x.Role == role)), detail = "3 role mặc định có user demo." },
+        new { code = "catalog.db", ok = await db.CatalogProducts.CountAsync() >= 30, detail = $"{await db.CatalogProducts.CountAsync()} sản phẩm đang lưu trong SQL Server LocalDB." },
+        new { code = "vnpay.config", ok = !string.IsNullOrWhiteSpace(configuration["VnPay:TmnCode"]) && !string.IsNullOrWhiteSpace(configuration["VnPay:HashSecret"]), detail = "VNPAY sandbox đã cấu hình." },
+        new { code = "gemini.key", ok = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GEMINI_API_KEY")), detail = "GEMINI_API_KEY đọc từ env; nếu trống, FE dùng gợi ý rule-based demo." },
+        new { code = "signalr.hub", ok = true, detail = "ChatHub mapped tại /hubs/chat." },
+        new { code = "jobs.running", ok = true, detail = "MembershipTierJob và VoucherExpireJob đã đăng ký." }
+    });
+
+    private object UserDto(UserRecord user) => new { user.Id, user.Email, user.FullName, user.Role, user.IsActive, user.MembershipTier, user.TotalSpent12M };
+
+    private static string Slugify(string value) => string.Join('-', value.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+}
+
+[ApiController]
+[Route("api/ai")]
+public sealed class AiController(DemoStore store) : ControllerBase
+{
+    [HttpPost("outfit-suggest")]
+    public IActionResult Suggest(OutfitSuggestRequest request)
+    {
+        var anchor = store.Products.FirstOrDefault(x => x.Id == request.AnchorProductId) ?? store.Products.First();
+        var suggestions = store.Products
+            .Where(x => x.Id != anchor.Id)
+            .Take(3)
+            .Select((product, index) => new
+            {
+                name = index == 0 ? "Set đi chơi hằng ngày" : "Set tối giản dễ mặc",
+                reason = $"Gemini demo gợi ý phối {anchor.Name} với {product.Name} dựa trên tag {string.Join(", ", product.Tags)}.",
+                products = new[] { CatalogController.ProductDto(anchor), CatalogController.ProductDto(product) }
+            });
+
+        return Ok(new
+        {
+            model = "gemini-2.0-flash",
+            source = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GEMINI_API_KEY")) ? "rule-based fallback" : "gemini-ready",
+            suggestions
+        });
+    }
+}
+
+[ApiController]
+[Route("api/chat")]
+public sealed class ChatController(DemoStore store) : ControllerBase
+{
+    [HttpGet("conversations")]
+    public IActionResult Conversations([FromQuery] Guid? userId) =>
+        Ok(store.Conversations.Where(x => !userId.HasValue || x.CustomerId == userId || x.AssignedStaffId == userId).OrderByDescending(x => x.LastMessageAt));
+
+    [HttpPost("conversations")]
+    public IActionResult CreateConversation(CreateConversationRequest request)
+    {
+        var staff = store.Users.FirstOrDefault(x => x.Role == "Staff")?.Id;
+        var conversation = new ChatConversationRecord(Guid.NewGuid(), request.CustomerId, request.GuestToken, staff, "Open", request.Subject, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow);
+        lock (store.SyncRoot)
+        {
+            store.Conversations.Add(conversation);
+        }
+
+        return Ok(conversation);
+    }
+
+    [HttpGet("conversations/{id:guid}/messages")]
+    public IActionResult Messages(Guid id) => Ok(store.ChatMessages.Where(x => x.ConversationId == id).OrderBy(x => x.CreatedAt));
+
+    [HttpPost("conversations/{id:guid}/messages")]
+    public IActionResult Send(Guid id, SendMessageRequest request)
+    {
+        var message = new ChatMessageRecord(Guid.NewGuid(), id, request.SenderId, request.SenderType, request.Content, request.AttachmentUrl, false, null, DateTimeOffset.UtcNow);
+        lock (store.SyncRoot)
+        {
+            store.ChatMessages.Add(message);
+            var conversation = store.Conversations.FirstOrDefault(x => x.Id == id);
+            if (conversation is not null)
+            {
+                conversation.LastMessageAt = message.CreatedAt;
+            }
+        }
+
+        return Ok(message);
+    }
+}
+
+public sealed record LoginRequest(string Email, string Password);
+public sealed record RegisterRequest(string Email, string Password, string FullName);
+public sealed record AddCartItemRequest(Guid? UserId, string? GuestToken, Guid ProductVariantId, int Quantity);
+public sealed record UpdateCartItemRequest(Guid? UserId, string? GuestToken, int Quantity);
+public sealed record CheckoutRequest(Guid? UserId, string? GuestToken, GuestInfoRecord GuestInfo, string PaymentMethod, string ShippingMethod, string ShippingAddress, string? VoucherCode, string? Note);
+public sealed record ReturnRequestDto(string Reason, decimal RefundAmount);
+public sealed record ConfirmCashRequest(Guid OrderId, string? StaffName);
+public sealed record CreateVnPayUrlRequest(Guid OrderId);
+public sealed record MarkVnPayFailedRequest(string OrderCode, string Reason);
+public sealed record UpdatePermissionsRequest(List<string> PermissionCodes);
+public sealed record CreateProductRequest(string Name, string Description, int CategoryId, string Brand, string Material, string Gender, decimal BasePrice, string ImageUrl, List<string> Tags, List<CreateProductVariantRequest> Variants);
+public sealed record CreateProductVariantRequest(string Sku, string Color, string Size, decimal Price, int StockQty);
+public sealed record UpdateProductRequest(string Name, string Description, int CategoryId, string Brand, string Material, string Gender, decimal BasePrice, string? ImageUrl, bool IsActive, List<string>? Tags, List<UpdateProductVariantRequest>? Variants);
+public sealed record UpdateProductVariantRequest(Guid? Id, string Sku, string Color, string Size, decimal Price, int StockQty, string? ImageUrl);
+public sealed record UpdateOrderStatusRequest(string Status, string? ChangedBy, string? Note);
+public sealed record CreateVoucherRequest(string Code, string Name, string Type, decimal Value, decimal MaxDiscount, decimal MinOrderAmount, int Quantity, string ApplicableTier, DateTimeOffset StartAt, DateTimeOffset ExpireAt);
+public sealed record OutfitSuggestRequest(Guid AnchorProductId, string? Occasion, string? Style);
+public sealed record CreateConversationRequest(Guid? CustomerId, string? GuestToken, string Subject);
+public sealed record SendMessageRequest(Guid? SenderId, string SenderType, string Content, string? AttachmentUrl);

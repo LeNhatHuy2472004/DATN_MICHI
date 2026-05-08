@@ -1,0 +1,6 @@
+@ThienPlan.Api_HostAddress = http://localhost:5149
+
+GET {{ThienPlan.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

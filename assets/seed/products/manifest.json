@@ -1,0 +1,53 @@
+{
+  "ao-thun-cotton-michi-daily": "/assets/seed/products/top.jpg",
+  "ao-polo-pique-co-det": "/assets/seed/products/top.jpg",
+  "ao-tank-top-rib-mem": "/assets/seed/products/top.jpg",
+  "ao-croptop-basic-co-vuong": "/assets/seed/products/top.jpg",
+  "so-mi-linen-trang-michi": "/assets/seed/products/top.jpg",
+  "ao-so-mi-oxford-xanh-nhat": "/assets/seed/products/top.jpg",
+  "ao-blouse-tay-phong": "/assets/seed/products/top.jpg",
+  "ao-hoodie-ni-tron": "/assets/seed/products/top.jpg",
+  "ao-sweater-co-tron": "/assets/seed/products/top.jpg",
+
+  "quan-jeans-ong-suong": "/assets/seed/products/bottom.jpg",
+  "quan-tay-ong-dung": "/assets/seed/products/bottom.jpg",
+  "quan-kaki-slim-crop": "/assets/seed/products/bottom.jpg",
+  "quan-cargo-tui-hop": "/assets/seed/products/bottom.jpg",
+  "quan-jogger-ni-bo-gau": "/assets/seed/products/bottom.jpg",
+  "quan-short-linen": "/assets/seed/products/bottom.jpg",
+
+  "ao-khoac-linen-dang-ngan": "/assets/seed/products/outerwear.jpg",
+  "ao-cardigan-len-mong": "/assets/seed/products/outerwear.jpg",
+  "ao-blazer-linen-relaxed": "/assets/seed/products/outerwear.jpg",
+  "ao-khoac-denim-washed": "/assets/seed/products/outerwear.jpg",
+  "ao-khoac-bomber-nylon": "/assets/seed/products/outerwear.jpg",
+
+  "non-cap-theu-logo-michi": "/assets/seed/products/accessory.jpg",
+  "that-lung-da-basic": "/assets/seed/products/accessory.jpg",
+  "khan-lua-vuong": "/assets/seed/products/accessory.jpg",
+  "vo-co-cao-rib": "/assets/seed/products/accessory.jpg",
+
+  "chan-vay-chu-a-denim": "/assets/seed/products/skirt.jpg",
+  "chan-vay-midi-xep-ly": "/assets/seed/products/skirt.jpg",
+
+  "dam-suong-cotton": "/assets/seed/products/dress.jpg",
+  "dam-so-mi-that-eo": "/assets/seed/products/dress.jpg",
+  "dam-hai-day-satin": "/assets/seed/products/dress.jpg",
+
+  "giay-sneaker-trang-toi-gian": "/assets/seed/products/shoes.jpg",
+  "giay-loafer-den": "/assets/seed/products/shoes.jpg",
+  "dep-quai-ngang-mem": "/assets/seed/products/shoes.jpg",
+
+  "tui-tote-canvas-michi": "/assets/seed/products/bag.jpg",
+
+  "_default": {
+    "1": "/assets/seed/products/top.jpg",
+    "2": "/assets/seed/products/bottom.jpg",
+    "3": "/assets/seed/products/outerwear.jpg",
+    "4": "/assets/seed/products/accessory.jpg",
+    "5": "/assets/seed/products/skirt.jpg",
+    "6": "/assets/seed/products/dress.jpg",
+    "7": "/assets/seed/products/shoes.jpg",
+    "8": "/assets/seed/products/bag.jpg"
+  }
+}
