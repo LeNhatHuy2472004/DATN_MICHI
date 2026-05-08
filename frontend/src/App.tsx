@@ -28,14 +28,26 @@ import brandLogoRound from './assets/brand/logo_tron.png'
 import brandLogoSquare from './assets/brand/logo_vuong.png'
 import vnpayLogo from './assets/brand/vnpay_logo.png'
 
+const heroDemoImages = [
+  {
+    src: 'https://images.pexels.com/photos/31971098/pexels-photo-31971098.jpeg?auto=compress&cs=tinysrgb&w=900',
+    alt: 'Michi lookbook beige blazer outfit',
+  },
+  {
+    src: 'https://images.pexels.com/photos/19821704/pexels-photo-19821704.jpeg?auto=compress&cs=tinysrgb&w=700',
+    alt: 'Michi lookbook black blazer outfit',
+  },
+  {
+    src: 'https://images.pexels.com/photos/35574662/pexels-photo-35574662.jpeg?auto=compress&cs=tinysrgb&w=700',
+    alt: 'Michi lookbook neutral brown outfit',
+  },
+] as const
+
 // Default to '' so the SPA hits the Vite dev proxy ("/api" → :5000), avoiding CORS in dev.
 // Set VITE_API_BASE explicitly when deploying or pointing at a remote API.
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 const guestToken = localStorage.getItem('tpc_guest') ?? `guest-${crypto.randomUUID()}`
 localStorage.setItem('tpc_guest', guestToken)
-// Hero collage is derived from DB at render time — see <Home /> below.
-// We show the first 3 products that have an admin-uploaded image; if fewer exist,
-// the remaining slots fall back to a monochrome placeholder card.
 let pendingVnPayTab: Window | null = null
 let pendingVnPayOrderCode = ''
 
@@ -145,6 +157,38 @@ type ChatMessage = {
 
 function formatMoney(value: number) {
   return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(value)
+}
+
+// Numeric input that formats with vi-VN thousand separators (e.g. 199000 -> "199.000")
+// and shows blank instead of "0" so users don't have to clear the field first.
+// Fully controlled — display is always derived from the parent's `value` prop.
+function MoneyInput({
+  value,
+  onChange,
+  placeholder = '0',
+  className,
+  ...rest
+}: {
+  value: number
+  onChange: (n: number) => void
+  placeholder?: string
+  className?: string
+} & Omit<React.InputHTMLAttributes<HTMLInputElement>, 'value' | 'onChange' | 'type'>) {
+  const display = value > 0 ? value.toLocaleString('vi-VN') : ''
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={display}
+      placeholder={placeholder}
+      onChange={(e) => {
+        const digits = e.target.value.replace(/\D/g, '')
+        onChange(digits ? parseInt(digits, 10) : 0)
+      }}
+      className={className}
+      {...rest}
+    />
+  )
 }
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
@@ -324,17 +368,15 @@ function Home() {
           </div>
         </div>
         <div className="hero-media">
-          {Array.from({ length: 3 }).map((_, i) => {
-            const product = products.filter((p) => p.imageUrl)[i]
-            if (product) {
-              return <img key={product.id} src={product.imageUrl} alt={product.name} />
-            }
-            return (
-              <div key={`placeholder-${i}`} className="hero-placeholder" aria-hidden>
-                <span>MICHI</span>
-              </div>
-            )
-          })}
+          {heroDemoImages.map((image, index) => (
+            <img
+              key={image.src}
+              src={image.src}
+              alt={image.alt}
+              decoding="async"
+              loading={index === 0 ? 'eager' : 'lazy'}
+            />
+          ))}
         </div>
       </section>
       <section className="band">
@@ -1229,7 +1271,7 @@ function AdminProducts() {
                 </label>
                 <label className="field">
                   <span>Giá cơ bản (VND)</span>
-                  <input type="number" min={0} value={form.basePrice} onChange={(e) => setForm({ ...form, basePrice: Number(e.target.value) })} />
+                  <MoneyInput value={form.basePrice} onChange={(n) => setForm({ ...form, basePrice: n })} placeholder="VD: 199.000" />
                 </label>
                 <label className="field" style={{ gridColumn: '1 / -1' }}>
                   <span>Mô tả</span>
@@ -1272,7 +1314,7 @@ function AdminProducts() {
                         <td><input value={v.sku} onChange={(e) => updateVariant(i, { sku: e.target.value })} /></td>
                         <td><input value={v.color} onChange={(e) => updateVariant(i, { color: e.target.value })} /></td>
                         <td><input value={v.size} onChange={(e) => updateVariant(i, { size: e.target.value })} style={{ width: 64 }} /></td>
-                        <td><input type="number" min={0} value={v.price} onChange={(e) => updateVariant(i, { price: Number(e.target.value) })} /></td>
+                        <td><MoneyInput value={v.price} onChange={(n) => updateVariant(i, { price: n })} /></td>
                         <td><input type="number" min={0} value={v.stockQty} onChange={(e) => updateVariant(i, { stockQty: Number(e.target.value) })} /></td>
                         <td>
                           {form.variants.length > 1 && (
