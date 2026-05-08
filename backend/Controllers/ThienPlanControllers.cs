@@ -66,7 +66,7 @@ public sealed class AuthController(DemoStore store, JwtTokenService jwt) : Contr
 
 [ApiController]
 [Route("api/catalog")]
-public sealed class CatalogController(DemoStore store) : ControllerBase
+public sealed class CatalogController(DemoStore store, AppDbContext db) : ControllerBase
 {
     [HttpGet("categories")]
     public IActionResult Categories() => Ok(store.Categories.OrderBy(x => x.DisplayOrder));
@@ -106,7 +106,16 @@ public sealed class CatalogController(DemoStore store) : ControllerBase
     }
 
     [HttpGet("vouchers")]
-    public IActionResult Vouchers() => Ok(store.Vouchers.Where(x => x.IsActive).OrderBy(x => x.ExpireAt));
+    public async Task<IActionResult> Vouchers()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var vouchers = await db.Vouchers
+            .AsNoTracking()
+            .Where(x => x.IsActive && x.StartAt <= now && x.ExpireAt >= now && x.UsedCount < x.Quantity)
+            .OrderBy(x => x.ExpireAt)
+            .ToListAsync();
+        return Ok(vouchers.Select(VoucherDto));
+    }
 
     public static object ProductDto(ProductRecord product) => new
     {
@@ -123,6 +132,23 @@ public sealed class CatalogController(DemoStore store) : ControllerBase
         product.Tags,
         product.ImageUrl,
         variants = product.Variants.Select(v => new { v.Id, v.Sku, v.Color, v.Size, v.Price, v.StockQty, v.ImageUrl })
+    };
+
+    public static object VoucherDto(VoucherEntity voucher) => new
+    {
+        voucher.Id,
+        voucher.Code,
+        voucher.Name,
+        voucher.Type,
+        voucher.Value,
+        voucher.MaxDiscount,
+        voucher.MinOrderAmount,
+        voucher.Quantity,
+        voucher.UsedCount,
+        voucher.ApplicableTier,
+        voucher.ExpireAt,
+        voucher.StartAt,
+        voucher.IsActive
     };
 }
 
@@ -233,10 +259,10 @@ public sealed class CartController(DemoStore store) : ControllerBase
 
 [ApiController]
 [Route("api/orders")]
-public sealed class OrdersController(DemoStore store) : ControllerBase
+public sealed class OrdersController(DemoStore store, AppDbContext db) : ControllerBase
 {
     [HttpPost]
-    public IActionResult Checkout(CheckoutRequest request)
+    public async Task<IActionResult> Checkout(CheckoutRequest request)
     {
         if (request.GuestInfo is null)
         {
@@ -256,6 +282,60 @@ public sealed class OrdersController(DemoStore store) : ControllerBase
             return BadRequest(new { message = "Phương thức thanh toán không hợp lệ." });
         }
 
+        var voucherCode = request.VoucherCode?.Trim();
+        VoucherEntity? voucher = null;
+        var discount = 0m;
+
+        if (!string.IsNullOrWhiteSpace(voucherCode))
+        {
+            if (!request.UserId.HasValue)
+            {
+                return BadRequest(new { message = "Vui lòng đăng nhập hoặc tạo tài khoản để sử dụng voucher." });
+            }
+
+            var user = store.Users.FirstOrDefault(x => x.Id == request.UserId.Value && x.IsActive);
+            if (user is null)
+            {
+                return BadRequest(new { message = "Tài khoản không hợp lệ hoặc đã ngừng hoạt động." });
+            }
+
+            voucher = await db.Vouchers.FirstOrDefaultAsync(x => x.Code == voucherCode.ToUpperInvariant());
+            if (voucher is null)
+            {
+                return BadRequest(new { message = "Voucher không tồn tại." });
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            if (!voucher.IsActive || now < voucher.StartAt || now > voucher.ExpireAt)
+            {
+                return BadRequest(new { message = "Voucher hiện không còn hiệu lực." });
+            }
+
+            if (voucher.UsedCount >= voucher.Quantity)
+            {
+                return BadRequest(new { message = "Voucher đã hết lượt sử dụng." });
+            }
+
+            if (!voucher.ApplicableTier.Equals("All", StringComparison.OrdinalIgnoreCase) &&
+                !voucher.ApplicableTier.Equals(user.MembershipTier, StringComparison.OrdinalIgnoreCase))
+            {
+                return BadRequest(new { message = $"Voucher này chỉ áp dụng cho khách hạng {voucher.ApplicableTier}." });
+            }
+
+            var cart = store.GetCart(request.UserId, request.GuestToken);
+            var subtotal = cart.Items.Sum(x => x.UnitPrice * x.Quantity);
+            if (subtotal < voucher.MinOrderAmount)
+            {
+                return BadRequest(new { message = $"Đơn hàng cần đạt tối thiểu {voucher.MinOrderAmount:N0} đ để sử dụng voucher này." });
+            }
+
+            discount = voucher.CalculateDiscount(subtotal);
+            if (discount <= 0)
+            {
+                return BadRequest(new { message = "Voucher chưa đủ điều kiện áp dụng cho đơn hàng này." });
+            }
+        }
+
         try
         {
             var order = store.CreateOrder(new CreateOrderRequest(
@@ -265,8 +345,16 @@ public sealed class OrdersController(DemoStore store) : ControllerBase
                 request.PaymentMethod,
                 request.ShippingMethod,
                 request.ShippingAddress,
-                request.VoucherCode,
+                voucher?.Code,
+                discount,
                 request.Note));
+
+            if (voucher is not null)
+            {
+                voucher.UsedCount++;
+                await db.SaveChangesAsync();
+            }
+
             return Ok(order);
         }
         catch (InvalidOperationException ex)
@@ -497,6 +585,8 @@ public sealed class PaymentsController(DemoStore store, IConfiguration configura
 public sealed class AdminController(DemoStore store, AppDbContext db, IConfiguration configuration, IWebHostEnvironment env) : ControllerBase
 {
     private static readonly string[] AllowedImageExt = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"];
+    private static readonly string[] VoucherTypes = ["FixedAmount", "Percent", "FreeShip"];
+    private static readonly string[] VoucherTiers = ["All", "Bronze", "Silver", "Gold", "Diamond"];
     private const long MaxImageBytes = 5 * 1024 * 1024; // 5 MB
 
     [HttpPost("upload/image")]
@@ -694,41 +784,88 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
     }
 
     [HttpGet("vouchers")]
-    public IActionResult Vouchers() => Ok(store.Vouchers.OrderBy(x => x.ExpireAt));
+    public async Task<IActionResult> Vouchers()
+    {
+        var vouchers = await db.Vouchers
+            .AsNoTracking()
+            .OrderBy(x => x.ExpireAt)
+            .ToListAsync();
+        return Ok(vouchers.Select(CatalogController.VoucherDto));
+    }
 
     [HttpPost("vouchers")]
-    public IActionResult CreateVoucher(CreateVoucherRequest request)
+    public async Task<IActionResult> CreateVoucher(CreateVoucherRequest request)
     {
-        var voucher = new VoucherRecord(Guid.NewGuid(), request.Code.ToUpperInvariant(), request.Name, request.Type, request.Value, request.MaxDiscount, request.MinOrderAmount, request.Quantity, 0, request.ApplicableTier, true, request.StartAt, request.ExpireAt);
-        lock (store.SyncRoot)
+        var code = request.Code.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(request.Name))
         {
-            store.Vouchers.Add(voucher);
+            return BadRequest(new { message = "Vui lòng nhập mã và tên voucher." });
         }
 
-        return Ok(voucher);
+        if (!VoucherTypes.Contains(request.Type))
+        {
+            return BadRequest(new { message = "Loại voucher không hợp lệ." });
+        }
+
+        if (!VoucherTiers.Contains(request.ApplicableTier))
+        {
+            return BadRequest(new { message = "Hạng khách hàng áp dụng không hợp lệ." });
+        }
+
+        if (request.Quantity <= 0 || request.Value <= 0 || request.MinOrderAmount < 0 || request.MaxDiscount < 0 || request.ExpireAt <= request.StartAt)
+        {
+            return BadRequest(new { message = "Thông tin voucher chưa hợp lệ." });
+        }
+
+        if (await db.Vouchers.AnyAsync(x => x.Code == code))
+        {
+            return Conflict(new { message = "Mã voucher đã tồn tại." });
+        }
+
+        var voucher = new VoucherEntity
+        {
+            Id = Guid.NewGuid(),
+            Code = code,
+            Name = request.Name.Trim(),
+            Type = request.Type,
+            Value = request.Value,
+            MaxDiscount = request.MaxDiscount,
+            MinOrderAmount = request.MinOrderAmount,
+            Quantity = request.Quantity,
+            UsedCount = 0,
+            ApplicableTier = request.ApplicableTier,
+            IsActive = true,
+            StartAt = request.StartAt,
+            ExpireAt = request.ExpireAt
+        };
+
+        db.Vouchers.Add(voucher);
+        await db.SaveChangesAsync();
+        return Ok(CatalogController.VoucherDto(voucher));
     }
 
     [HttpPost("vouchers/{id:guid}/expire")]
-    public IActionResult ExpireVoucher(Guid id)
+    public async Task<IActionResult> ExpireVoucher(Guid id)
     {
-        var voucher = store.Vouchers.FirstOrDefault(x => x.Id == id);
+        var voucher = await db.Vouchers.FirstOrDefaultAsync(x => x.Id == id);
         if (voucher is null)
         {
             return NotFound();
         }
 
         voucher.IsActive = false;
-        return Ok(voucher);
+        await db.SaveChangesAsync();
+        return Ok(CatalogController.VoucherDto(voucher));
     }
 
     [HttpGet("_health/features")]
     public async Task<IActionResult> FeatureHealth() => Ok(new[]
     {
         new { code = "permissions.seeded", ok = store.Permissions.Count >= 25, detail = $"{store.Permissions.Count} permissions đã seed." },
-        new { code = "roles.seeded", ok = new[] { "Administrator", "Staff", "Customer" }.All(role => store.Users.Any(x => x.Role == role)), detail = "3 role mặc định có user demo." },
+        new { code = "roles.seeded", ok = new[] { "Administrator", "Staff", "Customer" }.All(role => store.Users.Any(x => x.Role == role)), detail = "3 role mặc định đã sẵn sàng." },
         new { code = "catalog.db", ok = await db.CatalogProducts.CountAsync() >= 30, detail = $"{await db.CatalogProducts.CountAsync()} sản phẩm đang lưu trong SQL Server LocalDB." },
-        new { code = "vnpay.config", ok = !string.IsNullOrWhiteSpace(configuration["VnPay:TmnCode"]) && !string.IsNullOrWhiteSpace(configuration["VnPay:HashSecret"]), detail = "VNPAY sandbox đã cấu hình." },
-        new { code = "gemini.key", ok = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GEMINI_API_KEY")), detail = "GEMINI_API_KEY đọc từ env; nếu trống, FE dùng gợi ý rule-based demo." },
+        new { code = "vnpay.config", ok = !string.IsNullOrWhiteSpace(configuration["VnPay:TmnCode"]) && !string.IsNullOrWhiteSpace(configuration["VnPay:HashSecret"]), detail = "VNPAY đã cấu hình." },
+        new { code = "gemini.key", ok = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GEMINI_API_KEY")), detail = "GEMINI_API_KEY đọc từ biến môi trường; nếu trống, hệ thống dùng gợi ý nội bộ." },
         new { code = "signalr.hub", ok = true, detail = "ChatHub mapped tại /hubs/chat." },
         new { code = "jobs.running", ok = true, detail = "MembershipTierJob và VoucherExpireJob đã đăng ký." }
     });

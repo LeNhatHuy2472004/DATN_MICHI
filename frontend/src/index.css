@@ -379,6 +379,9 @@ main {
   box-shadow: var(--shadow-lg);
   overflow: hidden;
 }
+.modal.compact-modal {
+  width: min(520px, 100%);
+}
 .modal-head {
   display: flex;
   align-items: center;
@@ -834,6 +837,53 @@ select {
   color: var(--ink-500);
   font-size: 12px;
   line-height: 1.4;
+}
+.voucher-list {
+  display: grid;
+  gap: 10px;
+}
+.voucher-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  width: 100%;
+  padding: 14px;
+  border: 1px solid var(--ink-300);
+  border-radius: var(--radius);
+  background: var(--ink-0);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) ease, background var(--motion-fast) ease, transform var(--motion-fast) ease;
+}
+.voucher-option:hover:not(:disabled),
+.voucher-option.selected {
+  border-color: var(--ink-950);
+  background: var(--ink-100);
+  transform: translateY(-1px);
+}
+.voucher-option:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.voucher-option strong,
+.voucher-option b,
+.voucher-option small {
+  display: block;
+}
+.voucher-option strong {
+  color: var(--ink-900);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+}
+.voucher-option b {
+  color: var(--ink-900);
+  font-size: 12px;
+  text-align: right;
+}
+.voucher-option small {
+  color: var(--ink-500);
+  font-size: 12px;
 }
 .payment-mark,
 .payment-logo {

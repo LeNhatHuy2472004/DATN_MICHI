@@ -7,6 +7,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<CatalogCategoryEntity> CatalogCategories => Set<CatalogCategoryEntity>();
     public DbSet<CatalogProductEntity> CatalogProducts => Set<CatalogProductEntity>();
     public DbSet<CatalogProductVariantEntity> CatalogProductVariants => Set<CatalogProductVariantEntity>();
+    public DbSet<VoucherEntity> Vouchers => Set<VoucherEntity>();
     public DbSet<SeedMarkerEntity> SeedMarkers => Set<SeedMarkerEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -53,6 +54,20 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
                 .WithMany(x => x.Variants)
                 .HasForeignKey(x => x.ProductId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<VoucherEntity>(entity =>
+        {
+            entity.ToTable("Vouchers");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Code).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.Name).HasMaxLength(180).IsRequired();
+            entity.Property(x => x.Type).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.Value).HasColumnType("decimal(18,2)");
+            entity.Property(x => x.MaxDiscount).HasColumnType("decimal(18,2)");
+            entity.Property(x => x.MinOrderAmount).HasColumnType("decimal(18,2)");
+            entity.Property(x => x.ApplicableTier).HasMaxLength(40).IsRequired();
+            entity.HasIndex(x => x.Code).IsUnique();
         });
 
         modelBuilder.Entity<SeedMarkerEntity>(entity =>
@@ -102,6 +117,39 @@ public sealed class CatalogProductVariantEntity
     public decimal Price { get; set; }
     public int StockQty { get; set; }
     public string ImageUrl { get; set; } = string.Empty;
+}
+
+public sealed class VoucherEntity
+{
+    public Guid Id { get; set; }
+    public string Code { get; set; } = string.Empty;
+    public string Name { get; set; } = string.Empty;
+    public string Type { get; set; } = string.Empty;
+    public decimal Value { get; set; }
+    public decimal MaxDiscount { get; set; }
+    public decimal MinOrderAmount { get; set; }
+    public int Quantity { get; set; }
+    public int UsedCount { get; set; }
+    public string ApplicableTier { get; set; } = "All";
+    public bool IsActive { get; set; }
+    public DateTimeOffset StartAt { get; set; }
+    public DateTimeOffset ExpireAt { get; set; }
+
+    public decimal CalculateDiscount(decimal subtotal)
+    {
+        if (!IsActive || subtotal < MinOrderAmount || UsedCount >= Quantity || DateTimeOffset.UtcNow < StartAt || DateTimeOffset.UtcNow > ExpireAt)
+        {
+            return 0;
+        }
+
+        return Type switch
+        {
+            "Percent" => Math.Min(subtotal * Value / 100, MaxDiscount),
+            "FixedAmount" => Math.Min(Value, subtotal),
+            "FreeShip" => Math.Min(Value, MaxDiscount),
+            _ => 0
+        };
+    }
 }
 
 // Records that a one-shot seed has already been applied. Once a row exists for a

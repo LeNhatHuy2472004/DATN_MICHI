@@ -28,6 +28,7 @@ public static class CatalogDatabaseSeeder
         CancellationToken cancellationToken = default)
     {
         await db.Database.EnsureCreatedAsync(cancellationToken);
+        await EnsureVoucherTableAsync(db, cancellationToken);
 
         var alreadySeeded = await db.SeedMarkers.AnyAsync(x => x.Key == InitialSeedKey, cancellationToken);
         if (!alreadySeeded)
@@ -57,7 +58,147 @@ public static class CatalogDatabaseSeeder
             await db.SaveChangesAsync(cancellationToken);
         }
 
+        await SeedVouchersAsync(db, cancellationToken);
         await ReloadStoreAsync(db, store, cancellationToken);
+    }
+
+    private static async Task EnsureVoucherTableAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        await db.Database.ExecuteSqlRawAsync("""
+IF OBJECT_ID(N'[Vouchers]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [Vouchers] (
+        [Id] uniqueidentifier NOT NULL,
+        [Code] nvarchar(40) NOT NULL,
+        [Name] nvarchar(180) NOT NULL,
+        [Type] nvarchar(40) NOT NULL,
+        [Value] decimal(18,2) NOT NULL,
+        [MaxDiscount] decimal(18,2) NOT NULL,
+        [MinOrderAmount] decimal(18,2) NOT NULL,
+        [Quantity] int NOT NULL,
+        [UsedCount] int NOT NULL,
+        [ApplicableTier] nvarchar(40) NOT NULL,
+        [IsActive] bit NOT NULL,
+        [StartAt] datetimeoffset NOT NULL,
+        [ExpireAt] datetimeoffset NOT NULL,
+        CONSTRAINT [PK_Vouchers] PRIMARY KEY ([Id])
+    );
+END;
+
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Vouchers_Code' AND object_id = OBJECT_ID(N'[Vouchers]'))
+BEGIN
+    CREATE UNIQUE INDEX [IX_Vouchers_Code] ON [Vouchers] ([Code]);
+END;
+""", cancellationToken);
+    }
+
+    private static async Task SeedVouchersAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        if (await db.Vouchers.AnyAsync(cancellationToken))
+        {
+            return;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        db.Vouchers.AddRange(
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "WELCOME50",
+                Name = "Giảm 50K cho đơn đầu",
+                Type = "FixedAmount",
+                Value = 50000,
+                MaxDiscount = 50000,
+                MinOrderAmount = 300000,
+                Quantity = 100,
+                UsedCount = 0,
+                ApplicableTier = "All",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(2)
+            },
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "FREESHIP",
+                Name = "Miễn phí vận chuyển",
+                Type = "FreeShip",
+                Value = 30000,
+                MaxDiscount = 30000,
+                MinOrderAmount = 200000,
+                Quantity = 200,
+                UsedCount = 0,
+                ApplicableTier = "All",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(1)
+            },
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "BRONZE30",
+                Name = "Ưu đãi khách Bronze",
+                Type = "FixedAmount",
+                Value = 30000,
+                MaxDiscount = 30000,
+                MinOrderAmount = 250000,
+                Quantity = 100,
+                UsedCount = 0,
+                ApplicableTier = "Bronze",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(2)
+            },
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "SILVER7",
+                Name = "Ưu đãi khách Silver",
+                Type = "Percent",
+                Value = 7,
+                MaxDiscount = 90000,
+                MinOrderAmount = 500000,
+                Quantity = 80,
+                UsedCount = 0,
+                ApplicableTier = "Silver",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(3)
+            },
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "GOLD10",
+                Name = "Ưu đãi khách Gold",
+                Type = "Percent",
+                Value = 10,
+                MaxDiscount = 120000,
+                MinOrderAmount = 800000,
+                Quantity = 50,
+                UsedCount = 0,
+                ApplicableTier = "Gold",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(3)
+            },
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "DIAMOND15",
+                Name = "Ưu đãi khách Diamond",
+                Type = "Percent",
+                Value = 15,
+                MaxDiscount = 200000,
+                MinOrderAmount = 1200000,
+                Quantity = 30,
+                UsedCount = 0,
+                ApplicableTier = "Diamond",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(3)
+            });
+
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     // Manifest schema:

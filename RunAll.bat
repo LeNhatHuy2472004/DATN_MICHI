@@ -3,6 +3,20 @@ setlocal
 set ROOT=%~dp0
 echo === Michi: starting Backend + Frontend ===
 
+REM ===== Environment preflight =====
+REM Checks required tools and installs missing ones before starting the app:
+REM - .NET SDK 8 for backend
+REM - Node.js LTS + npm for frontend
+REM - SQL Server LocalDB for the (localdb)\MSSQLLocalDB connection string
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%scripts\EnsureEnvironment.ps1"
+set "PREFLIGHT_EXIT=%ERRORLEVEL%"
+if not "%PREFLIGHT_EXIT%"=="0" (
+  echo.
+  echo [ERROR] Environment preflight failed. If an installer needs permission, run RunAll.bat as Administrator.
+  pause
+  exit /b %PREFLIGHT_EXIT%
+)
+
 REM Stop old app instances first so repeated runs do not fail with "address already in use".
 echo [CHECK] Stopping existing services on ports 5000 and 5173 ...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$ports = @(5000, 5173); foreach ($port in $ports) { $processIds = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique; foreach ($processId in $processIds) { if ($processId -gt 0) { $process = Get-Process -Id $processId -ErrorAction SilentlyContinue; if ($process) { Write-Host ('[STOP] Port {0}: killing PID {1} ({2})' -f $port, $processId, $process.ProcessName); Stop-Process -Id $processId -Force } } } }"

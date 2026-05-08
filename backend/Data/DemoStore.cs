@@ -10,7 +10,6 @@ public sealed class DemoStore
     public List<PermissionRecord> Permissions { get; } = [];
     public List<CategoryRecord> Categories { get; } = [];
     public List<ProductRecord> Products { get; } = [];
-    public List<VoucherRecord> Vouchers { get; } = [];
     public List<CartRecord> Carts { get; } = [];
     public List<OrderRecord> Orders { get; } = [];
     public List<PaymentRecord> Payments { get; } = [];
@@ -86,14 +85,7 @@ public sealed class DemoStore
             }
 
             var subtotal = cart.Items.Sum(x => x.UnitPrice * x.Quantity);
-            var voucher = string.IsNullOrWhiteSpace(request.VoucherCode)
-                ? null
-                : Vouchers.FirstOrDefault(x => x.Code.Equals(request.VoucherCode, StringComparison.OrdinalIgnoreCase));
-            var discount = voucher?.CalculateDiscount(subtotal) ?? 0;
-            if (voucher is not null)
-            {
-                voucher.UsedCount++;
-            }
+            var discount = Math.Min(request.DiscountAmount, subtotal);
 
             var shippingFee = request.ShippingMethod == "PickupAtStore" ? 0 : 30000;
             var order = new OrderRecord(
@@ -158,12 +150,6 @@ public sealed class DemoStore
         UserPermissions[staff.Id] = [.. permissionCodes.Where(x => !x.StartsWith("staff.") && !x.StartsWith("report."))];
         UserPermissions[customer.Id] = [];
 
-        Vouchers.AddRange([
-            new VoucherRecord(Guid.NewGuid(), "WELCOME50", "Giảm 50K cho đơn đầu", "FixedAmount", 50000, 50000, 300000, 100, 0, "All", true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddMonths(2)),
-            new VoucherRecord(Guid.NewGuid(), "FREESHIP", "Miễn phí vận chuyển", "FreeShip", 30000, 30000, 200000, 200, 0, "All", true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddMonths(1)),
-            new VoucherRecord(Guid.NewGuid(), "GOLD10", "Khách Gold giảm 10%", "Percent", 10, 120000, 800000, 50, 0, "Gold", true, DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddMonths(3))
-        ]);
-
         var conversationId = Guid.NewGuid();
         Conversations.Add(new ChatConversationRecord(conversationId, customer.Id, null, staff.Id, "Open", "Tư vấn phối đồ", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
         ChatMessages.Add(new ChatMessageRecord(Guid.NewGuid(), conversationId, customer.Id, "Customer", "Shop tư vấn giúp mình áo thun phối với quần nào nhé?", null, false, null, DateTimeOffset.UtcNow.AddMinutes(-4)));
@@ -181,32 +167,10 @@ public sealed record ProductVariantRecord(Guid Id, string Sku, string Color, str
 {
     public int StockQty { get; set; } = StockQty;
 }
-public sealed record VoucherRecord(Guid Id, string Code, string Name, string Type, decimal Value, decimal MaxDiscount, decimal MinOrderAmount, int Quantity, int UsedCount, string ApplicableTier, bool IsActive, DateTimeOffset StartAt, DateTimeOffset ExpireAt)
-{
-    public int UsedCount { get; set; } = UsedCount;
-    public bool IsActive { get; set; } = IsActive;
-
-    public decimal CalculateDiscount(decimal subtotal)
-    {
-        if (!IsActive || subtotal < MinOrderAmount || UsedCount >= Quantity || DateTimeOffset.UtcNow > ExpireAt)
-        {
-            return 0;
-        }
-
-        return Type switch
-        {
-            "Percent" => Math.Min(subtotal * Value / 100, MaxDiscount),
-            "FixedAmount" => Math.Min(Value, subtotal),
-            "FreeShip" => Math.Min(Value, MaxDiscount),
-            _ => 0
-        };
-    }
-}
-
 public sealed record CartRecord(Guid Id, Guid? UserId, string GuestToken, List<CartItemRecord> Items);
 public sealed record CartItemRecord(Guid ProductVariantId, int Quantity, decimal UnitPrice);
 public sealed record GuestInfoRecord(string FullName, string PhoneNumber, string Email, string Address);
-public sealed record CreateOrderRequest(Guid? UserId, string? GuestToken, GuestInfoRecord GuestInfo, string PaymentMethod, string ShippingMethod, string ShippingAddress, string? VoucherCode, string? Note);
+public sealed record CreateOrderRequest(Guid? UserId, string? GuestToken, GuestInfoRecord GuestInfo, string PaymentMethod, string ShippingMethod, string ShippingAddress, string? VoucherCode, decimal DiscountAmount, string? Note);
 public sealed record OrderRecord(Guid Id, string OrderCode, Guid? UserId, GuestInfoRecord GuestInfo, List<OrderItemRecord> Items, decimal Subtotal, decimal DiscountAmount, decimal ShippingFee, decimal Total, string PaymentMethod, string PaymentStatus, string OrderStatus, string ShippingMethod, string ShippingAddress, string? VoucherCode, string? Note, DateTimeOffset CreatedAt, List<StatusHistoryRecord> History)
 {
     public string PaymentStatus { get; set; } = PaymentStatus;

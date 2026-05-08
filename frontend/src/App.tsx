@@ -28,7 +28,7 @@ import brandLogoRound from './assets/brand/logo_tron.png'
 import brandLogoSquare from './assets/brand/logo_vuong.png'
 import vnpayLogo from './assets/brand/vnpay_logo.png'
 
-const heroDemoImages = [
+const heroLookbookImages = [
   {
     src: 'https://images.pexels.com/photos/31971098/pexels-photo-31971098.jpeg?auto=compress&cs=tinysrgb&w=900',
     alt: 'Michi lookbook beige blazer outfit',
@@ -131,8 +131,12 @@ type Voucher = {
   name: string
   type: string
   value: number
+  maxDiscount: number
   minOrderAmount: number
+  quantity: number
+  usedCount: number
   applicableTier: string
+  startAt: string
   expireAt: string
   isActive: boolean
 }
@@ -157,6 +161,14 @@ type ChatMessage = {
 
 function formatMoney(value: number) {
   return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(value)
+}
+
+function estimateVoucherDiscount(voucher: Voucher, subtotal: number) {
+  if (subtotal < voucher.minOrderAmount) return 0
+  if (voucher.type === 'Percent') return Math.min((subtotal * voucher.value) / 100, voucher.maxDiscount)
+  if (voucher.type === 'FixedAmount') return Math.min(voucher.value, subtotal)
+  if (voucher.type === 'FreeShip') return Math.min(voucher.value, voucher.maxDiscount)
+  return 0
 }
 
 // Numeric input that formats with vi-VN thousand separators (e.g. 199000 -> "199.000")
@@ -203,7 +215,14 @@ async function api<T>(path: string, options?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const detail = await response.text()
-    throw new Error(detail || `API ${response.status}`)
+    let message = detail
+    try {
+      const parsed = JSON.parse(detail)
+      message = parsed.message || detail
+    } catch {
+      message = detail
+    }
+    throw new Error(message || `API ${response.status}`)
   }
   return response.json()
 }
@@ -225,13 +244,24 @@ function useAuth() {
     return result.user
   }
 
+  async function register(email: string, password: string, fullName: string) {
+    const result = await api<{ accessToken: string; user: User }>('/api/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, fullName }),
+    })
+    localStorage.setItem('tpc_token', result.accessToken)
+    localStorage.setItem('tpc_user', JSON.stringify(result.user))
+    setUser(result.user)
+    return result.user
+  }
+
   function logout() {
     localStorage.removeItem('tpc_token')
     localStorage.removeItem('tpc_user')
     setUser(null)
   }
 
-  return { user, login, logout }
+  return { user, login, register, logout }
 }
 
 function BrandLogo({ size = 40, spinning = false, variant = 'square' }: { size?: number; spinning?: boolean; variant?: 'round' | 'square' }) {
@@ -275,6 +305,7 @@ function App() {
         <Routes>
           <Route path="/admin" element={<AdminGate auth={auth}><AdminDashboard /></AdminGate>} />
           <Route path="/admin/products" element={<AdminGate auth={auth}><AdminProducts /></AdminGate>} />
+          <Route path="/admin/vouchers" element={<AdminGate auth={auth}><AdminVouchers /></AdminGate>} />
           <Route path="/admin/staff" element={<AdminGate auth={auth}><AdminStaff /></AdminGate>} />
           <Route path="/admin/chat" element={<AdminGate auth={auth}><AdminChat auth={auth} /></AdminGate>} />
           <Route path="/admin/_health" element={<AdminGate auth={auth}><AdminHealth /></AdminGate>} />
@@ -368,7 +399,7 @@ function Home() {
           </div>
         </div>
         <div className="hero-media">
-          {heroDemoImages.map((image, index) => (
+          {heroLookbookImages.map((image, index) => (
             <img
               key={image.src}
               src={image.src}
@@ -554,7 +585,12 @@ function CartPage({ auth }: { auth: ReturnType<typeof useAuth> }) {
 function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const navigate = useNavigate()
   const [cart, setCart] = useState<Cart>()
+  const [vouchers, setVouchers] = useState<Voucher[]>()
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [accountDialogOpen, setAccountDialogOpen] = useState(false)
+  const [quickPassword, setQuickPassword] = useState('')
+  const [quickAccountBusy, setQuickAccountBusy] = useState(false)
   const [form, setForm] = useState({
     fullName: auth.user?.fullName ?? '',
     phoneNumber: '0900000000',
@@ -569,48 +605,101 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
     api<Cart>(`/api/cart?guestToken=${guestToken}${auth.user ? `&userId=${auth.user.id}` : ''}`).then(setCart)
   }, [auth.user])
 
-  async function submit() {
-    setBusy(true)
-    const order = await api<Order>('/api/orders', {
-      method: 'POST',
-      body: JSON.stringify({
-        userId: auth.user?.id,
-        guestToken,
-        guestInfo: {
-          fullName: form.fullName,
-          phoneNumber: form.phoneNumber,
-          email: form.email,
-          address: form.address,
-        },
-        paymentMethod: form.paymentMethod,
-        shippingMethod: form.shippingMethod,
-        shippingAddress: form.address,
-        voucherCode: form.voucherCode,
-        note: 'Đơn tạo từ website Michi',
-      }),
-    })
+  useEffect(() => {
+    api<Voucher[]>('/api/catalog/vouchers').then(setVouchers)
+  }, [])
 
-    if (form.paymentMethod === 'VnPay') {
-      const result = await api<{ paymentUrl: string }>('/api/payments/vnpay/create-url', {
-        method: 'POST',
-        body: JSON.stringify({ orderId: order.id }),
-      })
-      const tab = window.open(result.paymentUrl, 'vnpay-tab')
-      if (!tab || tab.closed) {
-        window.location.href = result.paymentUrl
-        return
-      }
-      pendingVnPayTab = tab
-      pendingVnPayOrderCode = order.orderCode
-      localStorage.setItem(`tpc_vnpay_pending_${order.orderCode}`, JSON.stringify({ orderCode: order.orderCode, startedAt: Date.now() }))
-      navigate(`/account/orders/${order.orderCode}?waitingPayment=1`)
-    } else {
-      navigate(`/account/orders/${order.orderCode}`)
+  useEffect(() => {
+    if (!auth.user) return
+    setForm((current) => ({
+      ...current,
+      fullName: current.fullName || auth.user?.fullName || '',
+      email: current.email === 'guest@michi.local' ? auth.user?.email ?? current.email : current.email,
+    }))
+  }, [auth.user])
+
+  const availableVouchers = (vouchers ?? []).filter((voucher) =>
+    voucher.applicableTier === 'All' || voucher.applicableTier === auth.user?.membershipTier)
+  const selectedVoucher = availableVouchers.find((voucher) => voucher.code === form.voucherCode)
+  const estimatedShipping = form.shippingMethod === 'PickupAtStore' ? 0 : 30000
+  const estimatedDiscount = selectedVoucher ? estimateVoucherDiscount(selectedVoucher, cart?.subtotal ?? 0) : 0
+  const estimatedTotal = Math.max(0, (cart?.subtotal ?? 0) - estimatedDiscount + estimatedShipping)
+
+  function chooseVoucher(code: string) {
+    if (!auth.user) {
+      setAccountDialogOpen(true)
+      return
     }
-    setBusy(false)
+    setForm({ ...form, voucherCode: code })
   }
 
-  if (!cart) return <Loader.Page />
+  async function createQuickAccount() {
+    setError('')
+    if (!form.fullName.trim() || !form.email.trim() || !quickPassword.trim()) {
+      setError('Vui lòng nhập họ tên, email và mật khẩu để tạo tài khoản.')
+      return
+    }
+
+    setQuickAccountBusy(true)
+    try {
+      await auth.register(form.email.trim(), quickPassword, form.fullName.trim())
+      setAccountDialogOpen(false)
+      setQuickPassword('')
+    } catch (e) {
+      setError((e as Error).message || 'Không thể tạo tài khoản.')
+    } finally {
+      setQuickAccountBusy(false)
+    }
+  }
+
+  async function submit() {
+    setBusy(true)
+    setError('')
+    try {
+      const order = await api<Order>('/api/orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          userId: auth.user?.id,
+          guestToken,
+          guestInfo: {
+            fullName: form.fullName,
+            phoneNumber: form.phoneNumber,
+            email: form.email,
+            address: form.address,
+          },
+          paymentMethod: form.paymentMethod,
+          shippingMethod: form.shippingMethod,
+          shippingAddress: form.address,
+          voucherCode: form.voucherCode,
+          note: 'Đơn tạo từ website Michi',
+        }),
+      })
+
+      if (form.paymentMethod === 'VnPay') {
+        const result = await api<{ paymentUrl: string }>('/api/payments/vnpay/create-url', {
+          method: 'POST',
+          body: JSON.stringify({ orderId: order.id }),
+        })
+        const tab = window.open(result.paymentUrl, 'vnpay-tab')
+        if (!tab || tab.closed) {
+          window.location.href = result.paymentUrl
+          return
+        }
+        pendingVnPayTab = tab
+        pendingVnPayOrderCode = order.orderCode
+        localStorage.setItem(`tpc_vnpay_pending_${order.orderCode}`, JSON.stringify({ orderCode: order.orderCode, startedAt: Date.now() }))
+        navigate(`/account/orders/${order.orderCode}?waitingPayment=1`)
+      } else {
+        navigate(`/account/orders/${order.orderCode}`)
+      }
+    } catch (e) {
+      setError((e as Error).message || 'Không thể tạo đơn hàng.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!cart || !vouchers) return <Loader.Page />
 
   return (
     <section className="band">
@@ -645,7 +734,7 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
               <label>
                 <span>Vận chuyển</span>
                 <select value={form.shippingMethod} onChange={(e) => setForm({ ...form, shippingMethod: e.target.value })}>
-                  <option value="Delivery">Giao hàng giả lập</option>
+                  <option value="Delivery">Giao hàng tiêu chuẩn</option>
                   <option value="PickupAtStore">Nhận tại quầy</option>
                 </select>
               </label>
@@ -677,11 +766,11 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
                 onClick={() => setForm({ ...form, paymentMethod: 'VnPay' })}
               >
                 <span className="payment-mark">
-                  <img className="payment-logo" src={vnpayLogo} alt="Logo VNPAY Sandbox" />
+                  <img className="payment-logo" src={vnpayLogo} alt="Logo VNPAY" />
                 </span>
                 <span>
-                  <strong>VNPAY Sandbox</strong>
-                  <small>Mở tab VNPAY để thanh toán thử nghiệm</small>
+                  <strong>VNPAY</strong>
+                  <small>Thanh toán trực tuyến qua cổng VNPAY</small>
                 </span>
               </button>
             </div>
@@ -691,14 +780,44 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
               <span>3</span>
               <div>
                 <h3>Ưu đãi</h3>
-                <p>Voucher được backend kiểm tra lại khi tạo đơn.</p>
+                <p>Đăng nhập để sử dụng voucher dành riêng cho hạng thành viên của bạn.</p>
               </div>
             </div>
-            <select value={form.voucherCode} onChange={(e) => setForm({ ...form, voucherCode: e.target.value })}>
-              <option value="">Không dùng voucher</option>
-              <option value="WELCOME50">WELCOME50 - Giảm 50K</option>
-              <option value="FREESHIP">FREESHIP - Miễn phí vận chuyển</option>
-            </select>
+            {!auth.user && (
+              <button type="button" className="button secondary" onClick={() => setAccountDialogOpen(true)}>
+                Đăng nhập hoặc tạo tài khoản để dùng ưu đãi
+              </button>
+            )}
+            <div className="voucher-list">
+              {availableVouchers.map((voucher) => {
+                const disabled = !auth.user || (cart.subtotal < voucher.minOrderAmount)
+                const selected = form.voucherCode === voucher.code
+                return (
+                  <button
+                    type="button"
+                    key={voucher.id}
+                    className={selected ? 'voucher-option selected' : 'voucher-option'}
+                    disabled={disabled && !!auth.user}
+                    onClick={() => chooseVoucher(voucher.code)}
+                  >
+                    <span>
+                      <strong>{voucher.code}</strong>
+                      <small>{voucher.name}</small>
+                    </span>
+                    <span>
+                      <b>{voucher.applicableTier === 'All' ? 'Tất cả' : voucher.applicableTier}</b>
+                      <small>Đơn từ {formatMoney(voucher.minOrderAmount)}</small>
+                    </span>
+                  </button>
+                )
+              })}
+              {availableVouchers.length === 0 && <p className="hint">Hiện chưa có voucher phù hợp với hạng thành viên của bạn.</p>}
+            </div>
+            {form.voucherCode && (
+              <button type="button" className="button link" onClick={() => setForm({ ...form, voucherCode: '' })}>
+                Bỏ chọn voucher
+              </button>
+            )}
           </section>
         </div>
         <aside className="summary checkout-summary">
@@ -713,18 +832,55 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
           </div>
           <div className="summary-row">
             <span>Vận chuyển</span>
-            <strong>{form.shippingMethod === 'PickupAtStore' ? '0 đ' : '30.000 đ'}</strong>
+            <strong>{formatMoney(estimatedShipping)}</strong>
+          </div>
+          <div className="summary-row">
+            <span>Ưu đãi</span>
+            <strong>-{formatMoney(estimatedDiscount)}</strong>
           </div>
           <div className="summary-total">
             <span>Tổng dự kiến</span>
-            <strong>{formatMoney(cart.subtotal + (form.shippingMethod === 'PickupAtStore' ? 0 : 30000))}</strong>
+            <strong>{formatMoney(estimatedTotal)}</strong>
           </div>
+          {error && <p className="auth-error">{error}</p>}
           <button className="button lg" onClick={submit} disabled={busy || cart.items.length === 0}>
             {busy ? <Loader.Inline /> : <CreditCard size={18} />} Đặt hàng
           </button>
-          <p>Voucher và tồn kho được backend kiểm tra lại khi tạo đơn.</p>
+          <p>Đơn hàng sẽ được xác nhận và cập nhật tồn kho sau khi đặt hàng.</p>
         </aside>
       </div>
+      {accountDialogOpen && (
+        <div className="modal-backdrop" onClick={() => !quickAccountBusy && setAccountDialogOpen(false)}>
+          <div className="modal compact-modal" onClick={(e) => e.stopPropagation()}>
+            <header className="modal-head">
+              <h2>Tạo tài khoản để dùng ưu đãi</h2>
+              <button type="button" className="button ghost compact" onClick={() => setAccountDialogOpen(false)}>✕</button>
+            </header>
+            <div className="modal-body">
+              <p className="hint">Thông tin nhận hàng sẽ được dùng để tạo tài khoản khách hàng Michi.</p>
+              <label className="field">
+                <span>Họ tên</span>
+                <input value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} />
+              </label>
+              <label className="field">
+                <span>Email</span>
+                <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} type="email" />
+              </label>
+              <label className="field">
+                <span>Mật khẩu</span>
+                <input value={quickPassword} onChange={(e) => setQuickPassword(e.target.value)} type="password" autoComplete="new-password" />
+              </label>
+              {error && <p className="auth-error">{error}</p>}
+            </div>
+            <footer className="modal-foot">
+              <Link className="button secondary" to="/login">Đăng nhập</Link>
+              <button type="button" className="button" disabled={quickAccountBusy} onClick={createQuickAccount}>
+                {quickAccountBusy ? <Loader.Inline /> : <Check size={16} />} Tạo tài khoản
+              </button>
+            </footer>
+          </div>
+        </div>
+      )}
     </section>
   )
 }
@@ -958,7 +1114,7 @@ function Login({ auth }: { auth: ReturnType<typeof useAuth> }) {
         {busy ? <Loader.Inline /> : <LogIn size={18} />} Vào hệ thống
       </button>
       <details className="auth-hint">
-        <summary>Tài khoản demo</summary>
+        <summary>Tài khoản truy cập</summary>
         <p>Admin: admin@michi.local / Admin@123</p>
         <p>Staff: staff@michi.local / Staff@123</p>
         <p>Khách: customer@michi.local / Customer@123</p>
@@ -1341,6 +1497,191 @@ function AdminProducts() {
   )
 }
 
+const voucherTypes = [
+  { value: 'FixedAmount', label: 'Giảm tiền' },
+  { value: 'Percent', label: 'Giảm phần trăm' },
+  { value: 'FreeShip', label: 'Miễn phí vận chuyển' },
+]
+
+const voucherTiers = ['All', 'Bronze', 'Silver', 'Gold', 'Diamond']
+
+function toDateTimeLocal(value: Date) {
+  const offset = value.getTimezoneOffset() * 60000
+  return new Date(value.getTime() - offset).toISOString().slice(0, 16)
+}
+
+function createEmptyVoucherForm() {
+  const now = new Date()
+  const expire = new Date(now)
+  expire.setMonth(expire.getMonth() + 1)
+  return {
+    code: '',
+    name: '',
+    type: 'FixedAmount',
+    value: 0,
+    maxDiscount: 0,
+    minOrderAmount: 0,
+    quantity: 100,
+    applicableTier: 'All',
+    startAt: toDateTimeLocal(now),
+    expireAt: toDateTimeLocal(expire),
+  }
+}
+
+function AdminVouchers() {
+  const [vouchers, setVouchers] = useState<Voucher[]>()
+  const [form, setForm] = useState(createEmptyVoucherForm())
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  async function reload() {
+    const rows = await api<Voucher[]>('/api/admin/vouchers')
+    setVouchers(rows)
+  }
+
+  useEffect(() => {
+    reload()
+  }, [])
+
+  async function save() {
+    setBusy(true)
+    setError('')
+    try {
+      await api<Voucher>('/api/admin/vouchers', {
+        method: 'POST',
+        body: JSON.stringify({
+          ...form,
+          code: form.code.trim().toUpperCase(),
+          name: form.name.trim(),
+          startAt: new Date(form.startAt).toISOString(),
+          expireAt: new Date(form.expireAt).toISOString(),
+        }),
+      })
+      setForm(createEmptyVoucherForm())
+      await reload()
+    } catch (e) {
+      setError((e as Error).message || 'Không thể tạo voucher.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function expire(voucher: Voucher) {
+    setBusy(true)
+    setError('')
+    try {
+      await api(`/api/admin/vouchers/${voucher.id}/expire`, { method: 'POST' })
+      await reload()
+    } catch (e) {
+      setError((e as Error).message || 'Không thể ngưng áp dụng voucher.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <AdminLayout>
+      <SectionTitle icon={<CreditCard />} title="Quản lý voucher" />
+      <section className="checkout-panel">
+        <div className="form-grid checkout-fields">
+          <label>
+            <span>Mã voucher</span>
+            <input value={form.code} onChange={(e) => setForm({ ...form, code: e.target.value.toUpperCase() })} placeholder="VD: GOLD10" />
+          </label>
+          <label>
+            <span>Tên voucher</span>
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ưu đãi khách Gold" />
+          </label>
+          <label>
+            <span>Loại</span>
+            <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+              {voucherTypes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Giá trị</span>
+            <MoneyInput value={form.value} onChange={(n) => setForm({ ...form, value: n })} placeholder={form.type === 'Percent' ? 'VD: 10' : 'VD: 50.000'} />
+          </label>
+          <label>
+            <span>Giảm tối đa</span>
+            <MoneyInput value={form.maxDiscount} onChange={(n) => setForm({ ...form, maxDiscount: n })} placeholder="VD: 120.000" />
+          </label>
+          <label>
+            <span>Đơn tối thiểu</span>
+            <MoneyInput value={form.minOrderAmount} onChange={(n) => setForm({ ...form, minOrderAmount: n })} placeholder="VD: 500.000" />
+          </label>
+          <label>
+            <span>Số lượt</span>
+            <input type="number" min={1} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} />
+          </label>
+          <label>
+            <span>Hạng áp dụng</span>
+            <select value={form.applicableTier} onChange={(e) => setForm({ ...form, applicableTier: e.target.value })}>
+              {voucherTiers.map((tier) => <option key={tier} value={tier}>{tier === 'All' ? 'Tất cả' : tier}</option>)}
+            </select>
+          </label>
+          <label>
+            <span>Bắt đầu</span>
+            <input type="datetime-local" value={form.startAt} onChange={(e) => setForm({ ...form, startAt: e.target.value })} />
+          </label>
+          <label>
+            <span>Kết thúc</span>
+            <input type="datetime-local" value={form.expireAt} onChange={(e) => setForm({ ...form, expireAt: e.target.value })} />
+          </label>
+        </div>
+        {error && <p className="auth-error">{error}</p>}
+        <div className="toolbar">
+          <button type="button" className="button" disabled={busy || !form.code || !form.name} onClick={save}>
+            {busy ? <Loader.Inline /> : <Check size={16} />} Tạo voucher
+          </button>
+        </div>
+      </section>
+
+      {!vouchers ? (
+        <Loader.Overlay message="Đang tải voucher" />
+      ) : (
+        <table className="admin-table">
+          <thead>
+            <tr>
+              <th>Mã</th>
+              <th>Tên</th>
+              <th>Loại</th>
+              <th>Điều kiện</th>
+              <th>Hạng</th>
+              <th>Lượt dùng</th>
+              <th>Trạng thái</th>
+              <th style={{ width: 150 }}>Hành động</th>
+            </tr>
+          </thead>
+          <tbody>
+            {vouchers.map((voucher) => (
+              <tr key={voucher.id}>
+                <td><strong>{voucher.code}</strong></td>
+                <td>{voucher.name}</td>
+                <td>{voucherTypes.find((x) => x.value === voucher.type)?.label ?? voucher.type}</td>
+                <td>
+                  <div>{voucher.type === 'Percent' ? `${voucher.value}%` : formatMoney(voucher.value)}</div>
+                  <div className="muted-line">Đơn từ {formatMoney(voucher.minOrderAmount)}</div>
+                </td>
+                <td>{voucher.applicableTier === 'All' ? 'Tất cả' : voucher.applicableTier}</td>
+                <td>{voucher.usedCount}/{voucher.quantity}</td>
+                <td>{voucher.isActive ? 'Đang áp dụng' : 'Đã ngưng'}</td>
+                <td>
+                  {voucher.isActive && (
+                    <button type="button" className="button danger compact" disabled={busy} onClick={() => expire(voucher)}>
+                      Ngưng áp dụng
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </AdminLayout>
+  )
+}
+
 function AdminStaff() {
   const [staff, setStaff] = useState<Array<{ id: string; fullName: string; email: string; role: string }>>()
   const [detail, setDetail] = useState<{ user: User; permissions: Array<{ code: string; module: string; name: string }>; granted: string[] }>()
@@ -1515,6 +1856,7 @@ function AdminLayout({ children }: { children: React.ReactNode }) {
   const links = [
     ['/admin', 'Dashboard'],
     ['/admin/products', 'Sản phẩm'],
+    ['/admin/vouchers', 'Voucher'],
     ['/admin/staff', 'Staff'],
     ['/admin/chat', 'Chat'],
     ['/admin/_health', 'Health'],

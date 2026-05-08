@@ -1,8 +1,9 @@
+using Microsoft.EntityFrameworkCore;
 using ThienPlan.Api.Data;
 
 namespace ThienPlan.Api.BackgroundJobs;
 
-public sealed class VoucherExpireJob(ILogger<VoucherExpireJob> logger, DemoStore store) : BackgroundService
+public sealed class VoucherExpireJob(ILogger<VoucherExpireJob> logger, IServiceScopeFactory scopeFactory) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -11,12 +12,22 @@ public sealed class VoucherExpireJob(ILogger<VoucherExpireJob> logger, DemoStore
             while (!stoppingToken.IsCancellationRequested)
             {
                 var expired = 0;
-                lock (store.SyncRoot)
+                await using (var scope = scopeFactory.CreateAsyncScope())
                 {
-                    foreach (var voucher in store.Vouchers.Where(x => x.ExpireAt < DateTimeOffset.UtcNow && x.IsActive))
+                    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+                    var vouchers = await db.Vouchers
+                        .Where(x => x.ExpireAt < DateTimeOffset.UtcNow && x.IsActive)
+                        .ToListAsync(stoppingToken);
+
+                    foreach (var voucher in vouchers)
                     {
                         voucher.IsActive = false;
-                        expired++;
+                    }
+
+                    expired = vouchers.Count;
+                    if (expired > 0)
+                    {
+                        await db.SaveChangesAsync(stoppingToken);
                     }
                 }
 
