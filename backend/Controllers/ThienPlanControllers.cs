@@ -9,46 +9,65 @@ namespace ThienPlan.Api.Controllers;
 
 [ApiController]
 [Route("api/auth")]
-public sealed class AuthController(DemoStore store, JwtTokenService jwt) : ControllerBase
+public sealed class AuthController(AppDbContext db, DemoStore store, JwtTokenService jwt) : ControllerBase
 {
     [HttpPost("login")]
-    public IActionResult Login(LoginRequest request)
+    public async Task<IActionResult> Login(LoginRequest request, CancellationToken cancellationToken)
     {
-        var user = store.FindUser(request.Email);
-        if (user is null || user.Password != request.Password || !user.IsActive)
+        var user = await db.Users.FirstOrDefaultAsync(x => x.Email == request.Email, cancellationToken);
+        if (user is null || user.PasswordHash != request.Password || !user.IsActive)
         {
-            return Unauthorized(new { message = "Email hoặc mật khẩu không đúng." });
+            return Unauthorized(new ApiError("Email hoặc mật khẩu không đúng.", "invalid_credentials"));
         }
 
-        return Ok(ToAuthResponse(user, jwt.CreateToken(user)));
+        return Ok(ToAuthResponse(user, store, jwt.CreateToken(user)));
     }
 
     [HttpPost("register")]
-    public IActionResult Register(RegisterRequest request)
+    public async Task<IActionResult> Register(RegisterRequest request, CancellationToken cancellationToken)
     {
+        if (await db.Users.AnyAsync(x => x.Email == request.Email, cancellationToken))
+        {
+            return Conflict(new ApiError("Email đã tồn tại.", "email_exists"));
+        }
+
+        var user = new UserEntity
+        {
+            Id = Guid.NewGuid(),
+            Email = request.Email,
+            PasswordHash = request.Password,
+            Role = "Customer",
+            FullName = request.FullName,
+            IsActive = true,
+            MembershipTier = "Bronze",
+            TotalSpent = 0,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        db.Users.Add(user);
+        await db.SaveChangesAsync(cancellationToken);
+
         lock (store.SyncRoot)
         {
-            if (store.FindUser(request.Email) is not null)
-            {
-                return Conflict(new { message = "Email đã tồn tại." });
-            }
-
-            var user = new UserRecord(Guid.NewGuid(), request.Email, request.Password, "Customer", request.FullName, true, "Bronze", 0, DateTimeOffset.UtcNow);
-            store.Users.Add(user);
             store.UserPermissions[user.Id] = [];
-            return Ok(ToAuthResponse(user, jwt.CreateToken(user)));
         }
+
+        return Ok(ToAuthResponse(user, store, jwt.CreateToken(user)));
     }
 
     [HttpGet("me")]
-    public IActionResult Me()
+    public async Task<IActionResult> Me(CancellationToken cancellationToken)
     {
         var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
-        var user = Guid.TryParse(userId, out var id) ? store.Users.FirstOrDefault(x => x.Id == id) : store.Users.First();
-        return Ok(ToAuthResponse(user ?? store.Users.First(), user is null ? string.Empty : jwt.CreateToken(user)));
+        if (!Guid.TryParse(userId, out var id)) return Unauthorized();
+
+        var user = await db.Users.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        if (user is null) return Unauthorized();
+
+        return Ok(ToAuthResponse(user, store, jwt.CreateToken(user)));
     }
 
-    private object ToAuthResponse(UserRecord user, string token) => new
+    private static object ToAuthResponse(UserEntity user, DemoStore store, string token) => new
     {
         accessToken = token,
         refreshToken = $"refresh-{Guid.NewGuid():N}",
@@ -59,9 +78,43 @@ public sealed class AuthController(DemoStore store, JwtTokenService jwt) : Contr
             user.FullName,
             user.Role,
             user.MembershipTier,
+            user.TotalSpent,
             permissions = store.UserPermissions.TryGetValue(user.Id, out var permissions) ? permissions.Order().ToArray() : []
         }
     };
+}
+
+[ApiController]
+[Route("api/account")]
+public sealed class AccountController(AppDbContext db, DemoStore store) : ControllerBase
+{
+    [HttpGet("orders")]
+    public IActionResult GetOrders()
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userId, out var id)) return Unauthorized();
+        var user = db.Users.FirstOrDefault(x => x.Id == id);
+        if (user is null) return Unauthorized();
+
+        var orders = store.Orders.Where(x => x.UserId == user.Id).OrderByDescending(x => x.CreatedAt).ToList();
+        return Ok(orders);
+    }
+
+    [HttpGet("vouchers")]
+    public async Task<IActionResult> GetVouchers(CancellationToken cancellationToken)
+    {
+        var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+        if (!Guid.TryParse(userId, out var id)) return Unauthorized();
+        var user = await db.Users.FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+        if (user is null) return Unauthorized();
+
+        var vouchers = await db.Vouchers
+            .Where(x => x.IsActive && x.StartAt <= DateTimeOffset.UtcNow && x.ExpireAt >= DateTimeOffset.UtcNow)
+            .Where(x => x.Scope == "All" || (x.Scope == "Tier" && x.ApplicableTier == user.MembershipTier) || (x.Scope == "Customer" && x.CustomerId == user.Id))
+            .ToListAsync(cancellationToken);
+
+        return Ok(vouchers);
+    }
 }
 
 [ApiController]
@@ -146,6 +199,8 @@ public sealed class CatalogController(DemoStore store, AppDbContext db) : Contro
         voucher.Quantity,
         voucher.UsedCount,
         voucher.ApplicableTier,
+        voucher.Scope,
+        voucher.CustomerId,
         voucher.ExpireAt,
         voucher.StartAt,
         voucher.IsActive
@@ -167,12 +222,12 @@ public sealed class CartController(DemoStore store) : ControllerBase
             var variant = store.Products.SelectMany(x => x.Variants).FirstOrDefault(x => x.Id == request.ProductVariantId);
             if (variant is null)
             {
-                return NotFound(new { message = "Không tìm thấy biến thể sản phẩm." });
+                return NotFound(new ApiError("Không tìm thấy biến thể sản phẩm."));
             }
 
             if (variant.StockQty < request.Quantity)
             {
-                return BadRequest(new { message = "Số lượng tồn kho không đủ." });
+                return BadRequest(new ApiError("Số lượng tồn kho không đủ."));
             }
 
             var cart = store.GetCart(request.UserId, request.GuestToken);
@@ -266,20 +321,20 @@ public sealed class OrdersController(DemoStore store, AppDbContext db) : Control
     {
         if (request.GuestInfo is null)
         {
-            return BadRequest(new { message = "Thiếu thông tin người nhận." });
+            return BadRequest(new ApiError("Thiếu thông tin người nhận."));
         }
 
         if (string.IsNullOrWhiteSpace(request.GuestInfo.FullName) ||
             string.IsNullOrWhiteSpace(request.GuestInfo.PhoneNumber) ||
             string.IsNullOrWhiteSpace(request.ShippingAddress))
         {
-            return BadRequest(new { message = "Vui lòng nhập đủ họ tên, số điện thoại và địa chỉ nhận hàng." });
+            return BadRequest(new ApiError("Vui lòng nhập đủ họ tên, số điện thoại và địa chỉ nhận hàng."));
         }
 
         if (!string.Equals(request.PaymentMethod, "Cash", StringComparison.OrdinalIgnoreCase) &&
             !string.Equals(request.PaymentMethod, "VnPay", StringComparison.OrdinalIgnoreCase))
         {
-            return BadRequest(new { message = "Phương thức thanh toán không hợp lệ." });
+            return BadRequest(new ApiError("Phương thức thanh toán không hợp lệ."));
         }
 
         var voucherCode = request.VoucherCode?.Trim();
@@ -290,36 +345,41 @@ public sealed class OrdersController(DemoStore store, AppDbContext db) : Control
         {
             if (!request.UserId.HasValue)
             {
-                return BadRequest(new { message = "Vui lòng đăng nhập hoặc tạo tài khoản để sử dụng voucher." });
+                return BadRequest(new ApiError("Vui lòng đăng nhập hoặc tạo tài khoản để sử dụng voucher."));
             }
 
             var user = store.Users.FirstOrDefault(x => x.Id == request.UserId.Value && x.IsActive);
             if (user is null)
             {
-                return BadRequest(new { message = "Tài khoản không hợp lệ hoặc đã ngừng hoạt động." });
+                return BadRequest(new ApiError("Tài khoản không hợp lệ hoặc đã ngừng hoạt động."));
             }
 
             voucher = await db.Vouchers.FirstOrDefaultAsync(x => x.Code == voucherCode.ToUpperInvariant());
             if (voucher is null)
             {
-                return BadRequest(new { message = "Voucher không tồn tại." });
+                return BadRequest(new ApiError("Voucher không tồn tại."));
             }
 
             var now = DateTimeOffset.UtcNow;
             if (!voucher.IsActive || now < voucher.StartAt || now > voucher.ExpireAt)
             {
-                return BadRequest(new { message = "Voucher hiện không còn hiệu lực." });
+                return BadRequest(new ApiError("Voucher hiện không còn hiệu lực."));
             }
 
             if (voucher.UsedCount >= voucher.Quantity)
             {
-                return BadRequest(new { message = "Voucher đã hết lượt sử dụng." });
+                return BadRequest(new ApiError("Voucher đã hết lượt sử dụng."));
             }
 
-            if (!voucher.ApplicableTier.Equals("All", StringComparison.OrdinalIgnoreCase) &&
+            if (voucher.Scope == "Tier" && !voucher.ApplicableTier.Equals("All", StringComparison.OrdinalIgnoreCase) &&
                 !voucher.ApplicableTier.Equals(user.MembershipTier, StringComparison.OrdinalIgnoreCase))
             {
-                return BadRequest(new { message = $"Voucher này chỉ áp dụng cho khách hạng {voucher.ApplicableTier}." });
+                return BadRequest(new ApiError($"Voucher này chỉ áp dụng cho khách hạng {voucher.ApplicableTier}.", "invalid_tier"));
+            }
+
+            if (voucher.Scope == "Customer" && voucher.CustomerId != user.Id)
+            {
+                return BadRequest(new ApiError("Voucher này chỉ dành riêng cho một số khách hàng cụ thể.", "invalid_customer"));
             }
 
             var cart = store.GetCart(request.UserId, request.GuestToken);
@@ -332,7 +392,7 @@ public sealed class OrdersController(DemoStore store, AppDbContext db) : Control
             discount = voucher.CalculateDiscount(subtotal);
             if (discount <= 0)
             {
-                return BadRequest(new { message = "Voucher chưa đủ điều kiện áp dụng cho đơn hàng này." });
+                return BadRequest(new ApiError("Voucher chưa đủ điều kiện áp dụng cho đơn hàng này."));
             }
         }
 
@@ -498,7 +558,7 @@ public sealed class PaymentsController(DemoStore store, IConfiguration configura
     {
         if (string.IsNullOrWhiteSpace(request.OrderCode))
         {
-            return BadRequest(new { message = "Thiếu mã đơn hàng cần cập nhật thanh toán VNPAY." });
+            return BadRequest(new ApiError("Thiếu mã đơn hàng cần cập nhật thanh toán VNPAY."));
         }
 
         lock (store.SyncRoot)
@@ -594,9 +654,9 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
     public async Task<IActionResult> UploadImage(IFormFile file, [FromQuery] string? folder = "products")
     {
         if (file is null || file.Length == 0)
-            return BadRequest(new { message = "Thiếu file ảnh." });
+            return BadRequest(new ApiError("Thiếu file ảnh."));
         if (file.Length > MaxImageBytes)
-            return BadRequest(new { message = "Ảnh tối đa 5MB." });
+            return BadRequest(new ApiError("Ảnh tối đa 5MB."));
 
         var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
         if (!AllowedImageExt.Contains(ext))
@@ -627,14 +687,36 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
     }
 
     [HttpGet("dashboard")]
-    public IActionResult Dashboard() => Ok(new
+    public IActionResult Dashboard()
     {
-        revenue = store.Orders.Where(x => x.PaymentStatus == "Paid").Sum(x => x.Total),
-        orderCount = store.Orders.Count,
-        productCount = store.Products.Count,
-        lowStock = store.Products.SelectMany(x => x.Variants).Count(x => x.StockQty <= 10),
-        openChats = store.Conversations.Count(x => x.Status == "Open")
-    });
+        var sevenDaysAgo = DateTimeOffset.UtcNow.AddDays(-7);
+        return Ok(new
+        {
+            revenue = store.Orders.Where(x => x.PaymentStatus == "Paid").Sum(x => x.Total),
+            orderCount = store.Orders.Count,
+            productCount = store.Products.Count,
+            lowStock = store.Products.SelectMany(x => x.Variants).Count(x => x.StockQty <= 10),
+            openChats = store.Conversations.Count(x => x.Status == "Open"),
+            revenueByDay = Enumerable.Range(0, 7)
+                .Select(i => DateTimeOffset.UtcNow.Date.AddDays(-6 + i))
+                .Select(date => new
+                {
+                    date = date.ToString("yyyy-MM-dd"),
+                    revenue = store.Orders.Where(x => x.PaymentStatus == "Paid" && x.CreatedAt.Date == date).Sum(x => x.Total),
+                    orders = store.Orders.Count(x => x.CreatedAt.Date == date)
+                }).ToList(),
+            ordersByStatus = store.Orders.GroupBy(x => x.OrderStatus).Select(g => new { status = g.Key, count = g.Count() }).ToList(),
+            topProducts = store.Orders.SelectMany(x => x.Items)
+                .GroupBy(x => x.ProductName)
+                .Select(g => new { name = g.Key, quantity = g.Sum(i => i.Quantity), revenue = g.Sum(i => i.UnitPrice * i.Quantity) })
+                .OrderByDescending(x => x.revenue)
+                .Take(5)
+                .ToList(),
+            stockByCategory = store.Products.GroupBy(x => store.Categories.FirstOrDefault(c => c.Id == x.CategoryId)?.Name ?? "Khác")
+                .Select(g => new { category = g.Key, stock = g.Sum(p => p.Variants.Sum(v => v.StockQty)) })
+                .ToList()
+        });
+    }
 
     [HttpGet("staff")]
     public IActionResult Staff() => Ok(store.Users.Where(x => x.Role is "Staff" or "Administrator").Select(UserDto));
@@ -669,11 +751,51 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
     [HttpPost("products")]
     public async Task<IActionResult> CreateProduct(CreateProductRequest request)
     {
+        if (string.IsNullOrWhiteSpace(request.Name))
+        {
+            return BadRequest(new ApiError("Vui lòng nhập tên sản phẩm.", "invalid_name"));
+        }
+
+        if (request.BasePrice < 0)
+        {
+            return BadRequest(new ApiError("Giá sản phẩm không hợp lệ.", "invalid_price"));
+        }
+
+        if (request.Variants is null || request.Variants.Count == 0)
+        {
+            return BadRequest(new ApiError("Sản phẩm phải có ít nhất một phiên bản.", "invalid_variants"));
+        }
+
         var imageUrl = string.IsNullOrWhiteSpace(request.ImageUrl) ? "/assets/products/ao-thun.svg" : request.ImageUrl;
+
+        // Ensure unique slug — append short timestamp suffix if slug already taken
+        var baseSlug = Slugify(request.Name);
+        var slug = baseSlug;
+        var slugExists = await db.CatalogProducts.AnyAsync(p => p.Slug == slug);
+        if (slugExists)
+        {
+            slug = $"{baseSlug}-{DateTimeOffset.UtcNow:MMddHHmmss}";
+        }
+
+        // Ensure unique SKUs — append suffix when duplicate detected
+        var requestedSkus = request.Variants.Select(v => v.Sku).ToList();
+        var existingSkus = (await db.CatalogProductVariants
+            .Where(v => requestedSkus.Contains(v.Sku))
+            .Select(v => v.Sku)
+            .ToListAsync()).ToHashSet();
+
+        var variants = request.Variants.Select(v =>
+        {
+            var sku = existingSkus.Contains(v.Sku)
+                ? $"{v.Sku}-{DateTimeOffset.UtcNow:HHmmss}"
+                : v.Sku;
+            return new ProductVariantRecord(Guid.NewGuid(), sku, v.Color, v.Size, v.Price, v.StockQty, imageUrl);
+        }).ToList();
+
         var product = new ProductRecord(
             Guid.NewGuid(),
             request.Name,
-            Slugify(request.Name),
+            slug,
             request.Description,
             request.CategoryId,
             request.Brand,
@@ -683,7 +805,7 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
             true,
             request.Tags,
             imageUrl,
-            request.Variants.Select(v => new ProductVariantRecord(Guid.NewGuid(), v.Sku, v.Color, v.Size, v.Price, v.StockQty, imageUrl)).ToList());
+            variants);
 
         db.CatalogProducts.Add(CatalogDatabaseSeeder.ToEntity(product));
         await db.SaveChangesAsync();
@@ -695,7 +817,7 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
     public async Task<IActionResult> UpdateProduct(Guid id, UpdateProductRequest request)
     {
         var entity = await db.CatalogProducts.Include(p => p.Variants).FirstOrDefaultAsync(p => p.Id == id);
-        if (entity is null) return NotFound(new { message = "Không tìm thấy sản phẩm." });
+        if (entity is null) return NotFound(new ApiError("Không tìm thấy sản phẩm."));
 
         entity.Name = request.Name;
         entity.Description = request.Description;
@@ -753,7 +875,7 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
     public async Task<IActionResult> DeleteProduct(Guid id)
     {
         var entity = await db.CatalogProducts.Include(p => p.Variants).FirstOrDefaultAsync(p => p.Id == id);
-        if (entity is null) return NotFound(new { message = "Không tìm thấy sản phẩm." });
+        if (entity is null) return NotFound(new ApiError("Không tìm thấy sản phẩm."));
 
         db.CatalogProductVariants.RemoveRange(entity.Variants);
         db.CatalogProducts.Remove(entity);
@@ -799,27 +921,27 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
         var code = request.Code.Trim().ToUpperInvariant();
         if (string.IsNullOrWhiteSpace(code) || string.IsNullOrWhiteSpace(request.Name))
         {
-            return BadRequest(new { message = "Vui lòng nhập mã và tên voucher." });
+            return BadRequest(new ApiError("Vui lòng nhập mã và tên voucher."));
         }
 
         if (!VoucherTypes.Contains(request.Type))
         {
-            return BadRequest(new { message = "Loại voucher không hợp lệ." });
+            return BadRequest(new ApiError("Loại voucher không hợp lệ."));
         }
 
         if (!VoucherTiers.Contains(request.ApplicableTier))
         {
-            return BadRequest(new { message = "Hạng khách hàng áp dụng không hợp lệ." });
+            return BadRequest(new ApiError("Hạng khách hàng áp dụng không hợp lệ."));
         }
 
         if (request.Quantity <= 0 || request.Value <= 0 || request.MinOrderAmount < 0 || request.MaxDiscount < 0 || request.ExpireAt <= request.StartAt)
         {
-            return BadRequest(new { message = "Thông tin voucher chưa hợp lệ." });
+            return BadRequest(new ApiError("Thông tin voucher chưa hợp lệ."));
         }
 
         if (await db.Vouchers.AnyAsync(x => x.Code == code))
         {
-            return Conflict(new { message = "Mã voucher đã tồn tại." });
+            return Conflict(new ApiError("Mã voucher đã tồn tại."));
         }
 
         var voucher = new VoucherEntity
@@ -833,7 +955,9 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
             MinOrderAmount = request.MinOrderAmount,
             Quantity = request.Quantity,
             UsedCount = 0,
-            ApplicableTier = request.ApplicableTier,
+            ApplicableTier = request.ApplicableTier ?? "All",
+            Scope = request.Scope ?? "All",
+            CustomerId = request.CustomerId,
             IsActive = true,
             StartAt = request.StartAt,
             ExpireAt = request.ExpireAt
@@ -872,12 +996,35 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
 
     private object UserDto(UserRecord user) => new { user.Id, user.Email, user.FullName, user.Role, user.IsActive, user.MembershipTier, user.TotalSpent12M };
 
-    private static string Slugify(string value) => string.Join('-', value.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries));
+    private static string Slugify(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var normalizedString = value.Normalize(System.Text.NormalizationForm.FormD);
+        var stringBuilder = new System.Text.StringBuilder(capacity: normalizedString.Length);
+
+        foreach (var c in normalizedString)
+        {
+            var unicodeCategory = System.Globalization.CharUnicodeInfo.GetUnicodeCategory(c);
+            if (unicodeCategory != System.Globalization.UnicodeCategory.NonSpacingMark)
+            {
+                stringBuilder.Append(c);
+            }
+        }
+
+        var noDiacritics = stringBuilder
+            .ToString()
+            .Normalize(System.Text.NormalizationForm.FormC)
+            .ToLowerInvariant();
+
+        var slug = System.Text.RegularExpressions.Regex.Replace(noDiacritics, @"[^a-z0-9\s-]", "");
+        return string.Join('-', slug.Split(new[] { ' ', '-' }, StringSplitOptions.RemoveEmptyEntries));
+    }
 }
 
 [ApiController]
 [Route("api/ai")]
-public sealed class AiController(DemoStore store) : ControllerBase
+public sealed class AiController(DemoStore store, ThienPlan.Api.Services.GeminiService geminiService, IWebHostEnvironment env) : ControllerBase
 {
     [HttpPost("outfit-suggest")]
     public IActionResult Suggest(OutfitSuggestRequest request)
@@ -898,6 +1045,42 @@ public sealed class AiController(DemoStore store) : ControllerBase
             model = "gemini-2.0-flash",
             source = string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("GEMINI_API_KEY")) ? "rule-based fallback" : "gemini-ready",
             suggestions
+        });
+    }
+
+    [HttpPost("try-on")]
+    [RequestSizeLimit(10 * 1024 * 1024)] // 10MB
+    public async Task<IActionResult> TryOn([FromForm] Guid productId, IFormFile? modelImage, [FromForm] string? note)
+    {
+        if (modelImage is null || modelImage.Length == 0)
+        {
+            return BadRequest(new ApiError("Vui lòng tải lên ảnh người mẫu hoặc khách hàng.", "invalid_image"));
+        }
+
+        var product = store.Products.FirstOrDefault(x => x.Id == productId);
+        if (product is null)
+        {
+            return NotFound(new ApiError("Không tìm thấy sản phẩm.", "product_not_found"));
+        }
+
+        var ext = Path.GetExtension(modelImage.FileName).ToLowerInvariant();
+        var safeName = $"{DateTime.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}{ext}";
+        var assetsRoot = Path.GetFullPath(Path.Combine(env.ContentRootPath, "..", "assets", "uploads", "tryon"));
+        Directory.CreateDirectory(assetsRoot);
+
+        var targetPath = Path.Combine(assetsRoot, safeName);
+        await using (var stream = System.IO.File.Create(targetPath))
+        {
+            await modelImage.CopyToAsync(stream);
+        }
+
+        var result = await geminiService.GenerateTryOnAsync(productId, targetPath, note);
+
+        return Ok(new
+        {
+            imageUrl = result.ImageUrl,
+            source = result.Source,
+            message = result.Message
         });
     }
 }
@@ -959,7 +1142,9 @@ public sealed record CreateProductVariantRequest(string Sku, string Color, strin
 public sealed record UpdateProductRequest(string Name, string Description, int CategoryId, string Brand, string Material, string Gender, decimal BasePrice, string? ImageUrl, bool IsActive, List<string>? Tags, List<UpdateProductVariantRequest>? Variants);
 public sealed record UpdateProductVariantRequest(Guid? Id, string Sku, string Color, string Size, decimal Price, int StockQty, string? ImageUrl);
 public sealed record UpdateOrderStatusRequest(string Status, string? ChangedBy, string? Note);
-public sealed record CreateVoucherRequest(string Code, string Name, string Type, decimal Value, decimal MaxDiscount, decimal MinOrderAmount, int Quantity, string ApplicableTier, DateTimeOffset StartAt, DateTimeOffset ExpireAt);
+public sealed record CreateVoucherRequest(string Code, string Name, string Type, decimal Value, decimal MaxDiscount, decimal MinOrderAmount, int Quantity, string ApplicableTier, string Scope, Guid? CustomerId, DateTimeOffset StartAt, DateTimeOffset ExpireAt);
 public sealed record OutfitSuggestRequest(Guid AnchorProductId, string? Occasion, string? Style);
 public sealed record CreateConversationRequest(Guid? CustomerId, string? GuestToken, string Subject);
 public sealed record SendMessageRequest(Guid? SenderId, string SenderType, string Content, string? AttachmentUrl);
+public sealed record AssignStaffRequest(Guid StaffId);
+public sealed record ApiError(string Message, string? Code = null);

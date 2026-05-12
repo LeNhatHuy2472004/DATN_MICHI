@@ -8,6 +8,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<CatalogProductEntity> CatalogProducts => Set<CatalogProductEntity>();
     public DbSet<CatalogProductVariantEntity> CatalogProductVariants => Set<CatalogProductVariantEntity>();
     public DbSet<VoucherEntity> Vouchers => Set<VoucherEntity>();
+    public DbSet<UserEntity> Users => Set<UserEntity>();
     public DbSet<SeedMarkerEntity> SeedMarkers => Set<SeedMarkerEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -67,6 +68,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.MaxDiscount).HasColumnType("decimal(18,2)");
             entity.Property(x => x.MinOrderAmount).HasColumnType("decimal(18,2)");
             entity.Property(x => x.ApplicableTier).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.Scope).HasMaxLength(40).IsRequired();
             entity.HasIndex(x => x.Code).IsUnique();
         });
 
@@ -76,6 +78,19 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasKey(x => x.Key);
             entity.Property(x => x.Key).HasMaxLength(80);
             entity.Property(x => x.Notes).HasMaxLength(400);
+        });
+
+        modelBuilder.Entity<UserEntity>(entity =>
+        {
+            entity.ToTable("Users");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.Email).HasMaxLength(180).IsRequired();
+            entity.Property(x => x.PasswordHash).HasMaxLength(256).IsRequired();
+            entity.Property(x => x.Role).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.FullName).HasMaxLength(180).IsRequired();
+            entity.Property(x => x.MembershipTier).HasMaxLength(40).IsRequired();
+            entity.Property(x => x.TotalSpent).HasColumnType("decimal(18,2)");
+            entity.HasIndex(x => x.Email).IsUnique();
         });
     }
 }
@@ -131,6 +146,8 @@ public sealed class VoucherEntity
     public int Quantity { get; set; }
     public int UsedCount { get; set; }
     public string ApplicableTier { get; set; } = "All";
+    public string Scope { get; set; } = "All"; // All, Tier, Customer
+    public Guid? CustomerId { get; set; }
     public bool IsActive { get; set; }
     public DateTimeOffset StartAt { get; set; }
     public DateTimeOffset ExpireAt { get; set; }
@@ -160,4 +177,17 @@ public sealed class SeedMarkerEntity
     public string Key { get; set; } = string.Empty;
     public DateTimeOffset AppliedAt { get; set; }
     public string Notes { get; set; } = string.Empty;
+}
+
+public sealed class UserEntity
+{
+    public Guid Id { get; set; }
+    public string Email { get; set; } = string.Empty;
+    public string PasswordHash { get; set; } = string.Empty;
+    public string Role { get; set; } = "Customer";
+    public string FullName { get; set; } = string.Empty;
+    public bool IsActive { get; set; } = true;
+    public string MembershipTier { get; set; } = "Bronze";
+    public decimal TotalSpent { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
 }

@@ -20,6 +20,9 @@ import {
   Truck,
   UserCog,
   Check,
+  User as UserIcon,
+  UserPlus,
+  Ticket,
 } from 'lucide-react'
 
 // Brand logos are bundled by Vite — Vite hashes the URLs and serves them from the FE
@@ -31,15 +34,15 @@ import vnpayLogo from './assets/brand/vnpay_logo.png'
 const heroLookbookImages = [
   {
     src: 'https://images.pexels.com/photos/31971098/pexels-photo-31971098.jpeg?auto=compress&cs=tinysrgb&w=900',
-    alt: 'Michi lookbook beige blazer outfit',
+    alt: 'MiiChin lookbook beige blazer outfit',
   },
   {
     src: 'https://images.pexels.com/photos/19821704/pexels-photo-19821704.jpeg?auto=compress&cs=tinysrgb&w=700',
-    alt: 'Michi lookbook black blazer outfit',
+    alt: 'MiiChin lookbook black blazer outfit',
   },
   {
     src: 'https://images.pexels.com/photos/35574662/pexels-photo-35574662.jpeg?auto=compress&cs=tinysrgb&w=700',
-    alt: 'Michi lookbook neutral brown outfit',
+    alt: 'MiiChin lookbook neutral brown outfit',
   },
 ] as const
 
@@ -61,6 +64,7 @@ type User = {
   fullName: string
   role: 'Administrator' | 'Staff' | 'Customer'
   membershipTier: string
+  totalSpent?: number
   permissions: string[]
 }
 
@@ -136,6 +140,8 @@ type Voucher = {
   quantity: number
   usedCount: number
   applicableTier: string
+  scope?: string
+  customerId?: string
   startAt: string
   expireAt: string
   isActive: boolean
@@ -271,7 +277,7 @@ function BrandLogo({ size = 40, spinning = false, variant = 'square' }: { size?:
       className={`brand-logo ${isRound ? 'round' : 'square'} ${spinning ? 'is-spinning' : ''}`}
       style={{ width: size, height: size }}
       role="img"
-      aria-label="Logo Michi"
+      aria-label="Logo MiiChin"
     >
       <img src={isRound ? brandLogoRound : brandLogoSquare} alt="" />
     </span>
@@ -325,7 +331,11 @@ function App() {
         <Route path="/payment/vnpay-return" element={<VnPayReturn />} />
         <Route path="/account/orders/:code" element={<OrderDetail />} />
         <Route path="/ai/outfit/:productId" element={<OutfitSuggest />} />
+        <Route path="/ai/try-on/:productId" element={<TryOn />} />
         <Route path="/login" element={<Login auth={auth} />} />
+        <Route path="/register" element={<Register auth={auth} />} />
+        <Route path="/account/profile" element={<AccountProfile auth={auth} />} />
+        <Route path="/account/orders" element={<AccountOrders auth={auth} />} />
       </Routes>
       <ChatWidget auth={auth} />
     </AppShell>
@@ -344,7 +354,7 @@ function AppShell({ auth, children }: { auth: ReturnType<typeof useAuth>; childr
       <header className="topbar">
         <Link className="brand" to="/">
           <BrandLogo />
-          <span>Michi</span>
+          <span>MiiChin</span>
         </Link>
         <nav>
           {nav.map((item) => (
@@ -357,17 +367,16 @@ function AppShell({ auth, children }: { auth: ReturnType<typeof useAuth>; childr
           <div className="topbar-actions">
             {isBackOfficeUser(auth.user) && (
               <Link className="button secondary compact" to="/admin">
-                <LayoutDashboard size={16} /> Quản trị Michi
+                <LayoutDashboard size={16} /> Quản trị MiiChin
               </Link>
             )}
-            <button className="ghost" onClick={auth.logout}>
-              {auth.user.fullName}
-            </button>
+            <AccountMenu auth={auth} />
           </div>
         ) : (
-          <Link className="button compact" to="/login">
-            <LogIn size={18} /> Đăng nhập
-          </Link>
+          <div className="topbar-actions">
+            <Link className="button ghost compact" to="/login">Đăng nhập</Link>
+            <Link className="button compact" to="/register">Đăng ký</Link>
+          </div>
         )}
       </header>
       <main key={location.pathname}>{children}</main>
@@ -389,8 +398,8 @@ function Home() {
     <>
       <section className="hero">
         <div>
-          <p className="eyebrow">Michi collection 2026</p>
-          <h1>Michi</h1>
+          <p className="eyebrow">MiiChin collection 2026</p>
+          <h1>MiiChin</h1>
           <p>Thời trang hằng ngày với chất liệu mềm, phom gọn và bảng màu dễ phối cho đi làm, đi học, đi chơi.</p>
           <div className="actions">
             <Link className="button" to="/shop">
@@ -519,7 +528,7 @@ function ProductDetail({ auth }: { auth: ReturnType<typeof useAuth> }) {
 
   return (
     <section className="detail">
-      <img className="detail-image" src={product.imageUrl} alt={product.name} />
+      <img className="detail-image" src={selected.imageUrl || product.imageUrl} alt={product.name} />
       <div>
         <p className="eyebrow">{product.brand} · {product.gender}</p>
         <h1>{product.name}</h1>
@@ -541,6 +550,9 @@ function ProductDetail({ auth }: { auth: ReturnType<typeof useAuth> }) {
           </button>
           <Link className="button secondary" to={`/ai/outfit/${product.id}`}>
             <Sparkles size={18} /> AI phối đồ
+          </Link>
+          <Link className="button secondary" to={`/ai/try-on/${product.id}`}>
+            <Sparkles size={18} /> AI Thử đồ
           </Link>
         </div>
       </div>
@@ -594,7 +606,7 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [form, setForm] = useState({
     fullName: auth.user?.fullName ?? '',
     phoneNumber: '0900000000',
-    email: auth.user?.email ?? 'guest@michi.local',
+    email: auth.user?.email ?? 'guest@miichin.local',
     address: '12 Nguyễn Trãi, Quận 1, TP.HCM',
     paymentMethod: 'Cash',
     shippingMethod: 'Delivery',
@@ -614,7 +626,7 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
     setForm((current) => ({
       ...current,
       fullName: current.fullName || auth.user?.fullName || '',
-      email: current.email === 'guest@michi.local' ? auth.user?.email ?? current.email : current.email,
+      email: current.email === 'guest@miichin.local' ? auth.user?.email ?? current.email : current.email,
     }))
   }, [auth.user])
 
@@ -671,7 +683,7 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
           shippingMethod: form.shippingMethod,
           shippingAddress: form.address,
           voucherCode: form.voucherCode,
-          note: 'Đơn tạo từ website Michi',
+          note: 'Đơn tạo từ website MiiChin',
         }),
       })
 
@@ -857,7 +869,7 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
               <button type="button" className="button ghost compact" onClick={() => setAccountDialogOpen(false)}>✕</button>
             </header>
             <div className="modal-body">
-              <p className="hint">Thông tin nhận hàng sẽ được dùng để tạo tài khoản khách hàng Michi.</p>
+              <p className="hint">Thông tin nhận hàng sẽ được dùng để tạo tài khoản khách hàng MiiChin.</p>
               <label className="field">
                 <span>Họ tên</span>
                 <input value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} />
@@ -1065,6 +1077,84 @@ function OutfitSuggest() {
   )
 }
 
+function TryOn() {
+  const { productId } = useParams()
+  const [product, setProduct] = useState<Product>()
+  const [modelImage, setModelImage] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string>('')
+  const [loading, setLoading] = useState(false)
+  const [resultUrl, setResultUrl] = useState<string>('')
+  const [message, setMessage] = useState<string>('')
+
+  useEffect(() => {
+    api<Product>(`/api/catalog/products/${productId}`).then(setProduct).catch(() => {})
+  }, [productId])
+
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const file = e.target.files[0]
+      setModelImage(file)
+      setPreviewUrl(URL.createObjectURL(file))
+    }
+  }
+
+  const handleTryOn = async () => {
+    if (!modelImage || !productId) return
+    setLoading(true)
+    setMessage('Đang xử lý hình ảnh với AI...')
+    try {
+      const formData = new FormData()
+      formData.append('productId', productId)
+      formData.append('modelImage', modelImage)
+      const res = await fetch('http://localhost:5242/api/ai/try-on', {
+        method: 'POST',
+        body: formData
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.message || 'Lỗi thử đồ')
+      setResultUrl(data.imageUrl)
+      setMessage(data.message)
+    } catch (err: any) {
+      setMessage(err.message)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (!product) return <Loader.Page />
+
+  return (
+    <section className="band">
+      <SectionTitle icon={<Bot />} title="AI Thử Đồ" />
+      <p className="hint">Sản phẩm: {product.name}</p>
+
+      <div className="grid two" style={{ gap: '30px', marginTop: '30px' }}>
+        <article className="card" style={{ padding: '20px' }}>
+          <h3>Tải ảnh người mẫu / của bạn lên</h3>
+          <p>Tối đa 10MB, nên dùng ảnh chụp thẳng, rõ người.</p>
+          <input type="file" accept="image/*" onChange={handleImageChange} style={{ margin: '15px 0' }} />
+          {previewUrl && <img src={previewUrl} alt="Preview" style={{ width: '100%', borderRadius: '8px', marginBottom: '15px' }} />}
+          <button className="button primary" disabled={!modelImage || loading} onClick={handleTryOn}>
+            {loading ? 'Đang tạo ảnh...' : 'Bắt đầu thử đồ'}
+          </button>
+          {message && <p style={{ marginTop: '15px', color: 'var(--ink-700)' }}>{message}</p>}
+        </article>
+
+        <article className="card" style={{ padding: '20px' }}>
+          <h3>Kết quả</h3>
+          {resultUrl ? (
+            <img src={resultUrl} alt="Result" style={{ width: '100%', borderRadius: '8px' }} />
+          ) : (
+            <div style={{ height: '300px', background: 'var(--ink-100)', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <p>{loading ? <Loader.Inline /> : 'Kết quả AI sẽ hiển thị ở đây'}</p>
+            </div>
+          )}
+        </article>
+      </div>
+    </section>
+  )
+}
+
 function Login({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const navigate = useNavigate()
   const [email, setEmail] = useState('')
@@ -1115,18 +1205,216 @@ function Login({ auth }: { auth: ReturnType<typeof useAuth> }) {
       </button>
       <details className="auth-hint">
         <summary>Tài khoản truy cập</summary>
-        <p>Admin: admin@michi.local / Admin@123</p>
-        <p>Staff: staff@michi.local / Staff@123</p>
-        <p>Khách: customer@michi.local / Customer@123</p>
+        <p>Admin: admin@miichin.local / Admin@123</p>
+        <p>Staff: staff@miichin.local / Staff@123</p>
+        <p>Khách: customer@miichin.local / Customer@123</p>
       </details>
+      <p className="hint" style={{ marginTop: 16 }}>
+        Chưa có tài khoản? <Link to="/register" className="button link">Đăng ký ngay</Link>
+      </p>
     </section>
   )
 }
 
-function AdminDashboard() {
-  const [data, setData] = useState<{ revenue: number; orderCount: number; productCount: number; lowStock: number; openChats: number }>()
+function Register({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const navigate = useNavigate()
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function submit() {
+    if (!fullName || !email || !password) {
+      setError('Vui lòng nhập đủ họ tên, email và mật khẩu.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      await api('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({ fullName, email, password }),
+      })
+      await auth.login(email, password)
+      navigate('/')
+    } catch (e) {
+      setError((e as Error).message || 'Đăng ký thất bại.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className="auth-panel">
+      <BrandLogo size={72} variant="round" />
+      <h1>Đăng ký</h1>
+      <input
+        value={fullName}
+        onChange={(e) => setFullName(e.target.value)}
+        placeholder="Họ và tên"
+        autoComplete="name"
+        onKeyDown={(e) => e.key === 'Enter' && submit()}
+      />
+      <input
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        type="email"
+        placeholder="Email"
+        autoComplete="email"
+        onKeyDown={(e) => e.key === 'Enter' && submit()}
+      />
+      <input
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        type="password"
+        placeholder="Mật khẩu"
+        autoComplete="new-password"
+        onKeyDown={(e) => e.key === 'Enter' && submit()}
+      />
+      {error && <p className="auth-error">{error}</p>}
+      <button type="button" className="button" disabled={busy} onClick={submit}>
+        {busy ? <Loader.Inline /> : <UserPlus size={18} />} Tạo tài khoản
+      </button>
+      <p className="hint" style={{ marginTop: 16 }}>
+        Đã có tài khoản? <Link to="/login" className="button link">Đăng nhập</Link>
+      </p>
+    </section>
+  )
+}
+
+function AccountMenu({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const [open, setOpen] = useState(false)
+  if (!auth.user) return null
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <button className="ghost" onClick={() => setOpen(!open)}>
+        <UserIcon size={16} /> {auth.user.fullName}
+      </button>
+      {open && (
+        <div className="account-dropdown">
+          <Link to="/account/profile" onClick={() => setOpen(false)}>Hồ sơ cá nhân</Link>
+          <Link to="/account/orders" onClick={() => setOpen(false)}>Đơn hàng</Link>
+          <hr />
+          <button onClick={() => { setOpen(false); auth.logout() }}>Đăng xuất</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AccountProfile({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const [vouchers, setVouchers] = useState<Voucher[]>([])
   useEffect(() => {
-    api<typeof data>('/api/admin/dashboard').then(setData)
+    if (auth.user) api<Voucher[]>('/api/account/vouchers').then(setVouchers)
+  }, [auth.user])
+
+  if (!auth.user) return <Navigate to="/login" replace />
+
+  return (
+    <section className="band">
+      <SectionTitle icon={<UserIcon />} title="Hồ sơ cá nhân" />
+      <div className="split">
+        <div className="list">
+          <article className="card">
+            <h3>Thông tin tài khoản</h3>
+            <div className="form-grid" style={{ marginTop: 16 }}>
+              <label className="field">
+                <span>Họ và tên</span>
+                <input value={auth.user.fullName} disabled />
+              </label>
+              <label className="field">
+                <span>Email</span>
+                <input value={auth.user.email} disabled />
+              </label>
+            </div>
+          </article>
+        </div>
+        <aside className="summary">
+          <h3>Hạng thành viên: <strong>{auth.user.membershipTier}</strong></h3>
+          <p>Chi tiêu tích luỹ: <strong>{formatMoney(auth.user.totalSpent ?? 0)}</strong></p>
+        </aside>
+      </div>
+
+      <div style={{ marginTop: 48 }}>
+        <SectionTitle icon={<Ticket />} title="Voucher của bạn" />
+        <div className="grid three">
+          {vouchers.map(v => (
+            <article className="card" key={v.id}>
+              <strong>{v.code}</strong>
+              <p>{v.name}</p>
+              <small>HSD: {new Date(v.expireAt).toLocaleDateString('vi-VN')}</small>
+            </article>
+          ))}
+          {vouchers.length === 0 && <p className="hint">Chưa có voucher nào khả dụng.</p>}
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function AccountOrders({ auth }: { auth: ReturnType<typeof useAuth> }) {
+  const [orders, setOrders] = useState<Order[]>([])
+  useEffect(() => {
+    if (auth.user) api<Order[]>('/api/account/orders').then(setOrders)
+  }, [auth.user])
+
+  if (!auth.user) return <Navigate to="/login" replace />
+
+  return (
+    <section className="band">
+      <SectionTitle icon={<ShoppingBag />} title="Đơn hàng của tôi" />
+      <div className="list">
+        {orders.map(o => (
+          <Link key={o.id} to={`/account/orders/${o.orderCode}`} className="card" style={{ display: 'flex', justifyContent: 'space-between', textDecoration: 'none', color: 'inherit' }}>
+            <div>
+              <strong>{o.orderCode}</strong>
+              <p>{new Date(o.history[0]?.changedAt).toLocaleString('vi-VN')} · {o.items.length} sản phẩm</p>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <strong style={{ border: 'none', padding: 0 }}>{formatMoney(o.total)}</strong>
+              <p>{o.orderStatus} · {o.paymentStatus}</p>
+            </div>
+          </Link>
+        ))}
+        {orders.length === 0 && <p className="hint">Chưa có đơn hàng nào.</p>}
+      </div>
+    </section>
+  )
+}
+
+function BarChart({ rows }: { rows: Array<{ label: string; value: number }> }) {
+  const max = Math.max(...rows.map((x) => x.value), 1)
+  return (
+    <div className="bar-chart">
+      {rows.map((row) => (
+        <div className="bar-row" key={row.label}>
+          <span>{row.label}</span>
+          <div><i style={{ width: `${(row.value / max) * 100}%` }} /></div>
+          <b>{formatMoney(row.value)}</b>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+type DashboardData = {
+  revenue: number
+  orderCount: number
+  productCount: number
+  lowStock: number
+  openChats: number
+  revenueByDay: Array<{ date: string; revenue: number; orders: number }>
+  ordersByStatus: Array<{ status: string; count: number }>
+  topProducts: Array<{ name: string; quantity: number; revenue: number }>
+  stockByCategory: Array<{ category: string; stock: number }>
+}
+
+function AdminDashboard() {
+  const [data, setData] = useState<DashboardData>()
+  useEffect(() => {
+    api<DashboardData>('/api/admin/dashboard').then(setData)
   }, [])
   if (!data) return <Loader.Page />
   return (
@@ -1139,6 +1427,30 @@ function AdminDashboard() {
         <Metric label="Sắp hết hàng" value={data.lowStock} />
         <Metric label="Chat mở" value={data.openChats} />
       </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginTop: '30px' }}>
+        <article className="card" style={{ padding: '20px' }}>
+          <h3>Doanh thu 7 ngày qua</h3>
+          <BarChart rows={data.revenueByDay.map(x => ({ label: x.date, value: x.revenue }))} />
+        </article>
+        
+        <article className="card" style={{ padding: '20px' }}>
+          <h3>Top Sản phẩm bán chạy</h3>
+          <BarChart rows={data.topProducts.map(x => ({ label: x.name, value: x.revenue }))} />
+        </article>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '30px', marginTop: '30px' }}>
+        <article className="card" style={{ padding: '20px' }}>
+          <h3>Đơn hàng theo trạng thái</h3>
+          <BarChart rows={data.ordersByStatus.map(x => ({ label: x.status, value: x.count }))} />
+        </article>
+
+        <article className="card" style={{ padding: '20px' }}>
+          <h3>Tồn kho theo danh mục</h3>
+          <BarChart rows={data.stockByCategory.map(x => ({ label: x.category, value: x.stock }))} />
+        </article>
+      </div>
     </AdminLayout>
   )
 }
@@ -1149,7 +1461,7 @@ function AdminShell({ auth, children }: { auth: ReturnType<typeof useAuth>; chil
       <header className="admin-topbar">
         <Link className="brand" to="/admin">
           <BrandLogo />
-          <span>Michi Admin</span>
+          <span>MiiChin Admin</span>
         </Link>
         <div className="admin-topbar-actions">
           <Link className="button secondary compact" to="/">
@@ -1201,7 +1513,7 @@ const emptyProductForm: ProductFormState = {
   name: '',
   description: '',
   categoryId: 1,
-  brand: 'Michi',
+  brand: 'MiiChin',
   material: '',
   gender: 'Unisex',
   basePrice: 0,
@@ -1229,7 +1541,7 @@ function AdminProducts() {
   }, [])
 
   function openCreate() {
-    setForm({ ...emptyProductForm, variants: [{ sku: `MICHI-${Date.now()}`, color: '', size: 'M', price: 0, stockQty: 0 }] })
+    setForm({ ...emptyProductForm, variants: [{ sku: `MIICHIN-${Date.now()}`, color: '', size: 'M', price: 0, stockQty: 0 }] })
   }
 
   function openEdit(product: Product) {
@@ -1320,7 +1632,7 @@ function AdminProducts() {
 
   function addVariant() {
     if (!form) return
-    setForm({ ...form, variants: [...form.variants, { sku: `MICHI-${Date.now()}`, color: '', size: 'M', price: form.basePrice, stockQty: 0 }] })
+    setForm({ ...form, variants: [...form.variants, { sku: `MIICHIN-${Date.now()}`, color: '', size: 'M', price: form.basePrice, stockQty: 0 }] })
   }
 
   function removeVariant(index: number) {
@@ -1401,7 +1713,7 @@ function AdminProducts() {
               <div className="form-grid">
                 <label className="field">
                   <span>Tên sản phẩm</span>
-                  <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ví dụ: Áo thun cotton Michi" />
+                  <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Ví dụ: Áo thun cotton MiiChin" />
                 </label>
                 <label className="field">
                   <span>Brand</span>
@@ -1522,7 +1834,9 @@ function createEmptyVoucherForm() {
     maxDiscount: 0,
     minOrderAmount: 0,
     quantity: 100,
+    scope: 'All',
     applicableTier: 'All',
+    customerId: '',
     startAt: toDateTimeLocal(now),
     expireAt: toDateTimeLocal(expire),
   }
@@ -1615,11 +1929,27 @@ function AdminVouchers() {
             <input type="number" min={1} value={form.quantity} onChange={(e) => setForm({ ...form, quantity: Number(e.target.value) })} />
           </label>
           <label>
-            <span>Hạng áp dụng</span>
-            <select value={form.applicableTier} onChange={(e) => setForm({ ...form, applicableTier: e.target.value })}>
-              {voucherTiers.map((tier) => <option key={tier} value={tier}>{tier === 'All' ? 'Tất cả' : tier}</option>)}
+            <span>Phạm vi</span>
+            <select value={form.scope} onChange={(e) => setForm({ ...form, scope: e.target.value })}>
+              <option value="All">Toàn bộ</option>
+              <option value="Tier">Hạng thành viên</option>
+              <option value="Customer">Cá nhân</option>
             </select>
           </label>
+          {form.scope === 'Tier' && (
+            <label>
+              <span>Hạng áp dụng</span>
+              <select value={form.applicableTier} onChange={(e) => setForm({ ...form, applicableTier: e.target.value })}>
+                {voucherTiers.map((tier) => <option key={tier} value={tier}>{tier === 'All' ? 'Tất cả' : tier}</option>)}
+              </select>
+            </label>
+          )}
+          {form.scope === 'Customer' && (
+            <label>
+              <span>Mã khách hàng (ID)</span>
+              <input value={form.customerId || ''} onChange={(e) => setForm({ ...form, customerId: e.target.value })} placeholder="VD: 33333333-..." />
+            </label>
+          )}
           <label>
             <span>Bắt đầu</span>
             <input type="datetime-local" value={form.startAt} onChange={(e) => setForm({ ...form, startAt: e.target.value })} />
@@ -1663,7 +1993,7 @@ function AdminVouchers() {
                   <div>{voucher.type === 'Percent' ? `${voucher.value}%` : formatMoney(voucher.value)}</div>
                   <div className="muted-line">Đơn từ {formatMoney(voucher.minOrderAmount)}</div>
                 </td>
-                <td>{voucher.applicableTier === 'All' ? 'Tất cả' : voucher.applicableTier}</td>
+                <td>{voucher.scope === 'Customer' ? 'Cá nhân' : (voucher.scope === 'Tier' ? voucher.applicableTier : 'Tất cả')}</td>
                 <td>{voucher.usedCount}/{voucher.quantity}</td>
                 <td>{voucher.isActive ? 'Đang áp dụng' : 'Đã ngưng'}</td>
                 <td>
@@ -1705,7 +2035,11 @@ function AdminStaff() {
       <div className="split">
         <div className="list">
           {staff?.map((item) => (
-            <button className="row-button" key={item.id} onClick={() => api<typeof detail>(`/api/admin/staff/${item.id}/permissions`).then(setDetail)}>
+            <button
+              className={detail?.user.id === item.id ? 'row-button selected' : 'row-button'}
+              key={item.id}
+              onClick={() => api<typeof detail>(`/api/admin/staff/${item.id}/permissions`).then(setDetail)}
+            >
               {item.fullName} · {item.role}
             </button>
           ))}
@@ -1864,7 +2198,11 @@ function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
     <section className="admin-layout">
       <aside>
-        {links.map(([to, label]) => <NavLink key={to} to={to}>{label}</NavLink>)}
+        {links.map(([to, label]) => (
+          <NavLink key={to} to={to} end={to === '/admin'} className={({ isActive }) => isActive ? 'active' : ''}>
+            {label}
+          </NavLink>
+        ))}
       </aside>
       <div>{children}</div>
     </section>

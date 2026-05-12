@@ -8,7 +8,7 @@ namespace ThienPlan.Api.Helpers;
 
 public sealed class JwtTokenService(IConfiguration configuration, DemoStore store)
 {
-    public string CreateToken(UserRecord user)
+    public string CreateToken(UserEntity user)
     {
         var permissions = store.UserPermissions.TryGetValue(user.Id, out var codes) ? codes : [];
         var claims = new List<Claim>

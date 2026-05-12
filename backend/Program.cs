@@ -7,6 +7,7 @@ using ThienPlan.Api.BackgroundJobs;
 using ThienPlan.Api.Data;
 using ThienPlan.Api.Helpers;
 using ThienPlan.Api.Hubs;
+using ThienPlan.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +27,7 @@ builder.Services.AddSingleton<DemoStore>();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 builder.Services.AddSingleton<JwtTokenService>();
+builder.Services.AddHttpClient<GeminiService>();
 builder.Services.AddHostedService<MembershipTierJob>();
 builder.Services.AddHostedService<VoucherExpireJob>();
 builder.Services.AddControllers();

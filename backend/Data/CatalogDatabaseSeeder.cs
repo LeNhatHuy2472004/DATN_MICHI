@@ -28,7 +28,8 @@ public static class CatalogDatabaseSeeder
         CancellationToken cancellationToken = default)
     {
         await db.Database.EnsureCreatedAsync(cancellationToken);
-        await EnsureVoucherTableAsync(db, cancellationToken);
+        await EnsureSchemaUpdatesAsync(db, cancellationToken);
+        await SeedUsersAsync(db, cancellationToken);
 
         var alreadySeeded = await db.SeedMarkers.AnyAsync(x => x.Key == InitialSeedKey, cancellationToken);
         if (!alreadySeeded)
@@ -62,7 +63,7 @@ public static class CatalogDatabaseSeeder
         await ReloadStoreAsync(db, store, cancellationToken);
     }
 
-    private static async Task EnsureVoucherTableAsync(AppDbContext db, CancellationToken cancellationToken)
+    private static async Task EnsureSchemaUpdatesAsync(AppDbContext db, CancellationToken cancellationToken)
     {
         await db.Database.ExecuteSqlRawAsync("""
 IF OBJECT_ID(N'[Vouchers]', N'U') IS NULL
@@ -78,6 +79,8 @@ BEGIN
         [Quantity] int NOT NULL,
         [UsedCount] int NOT NULL,
         [ApplicableTier] nvarchar(40) NOT NULL,
+        [Scope] nvarchar(40) DEFAULT N'All' NOT NULL,
+        [CustomerId] uniqueidentifier NULL,
         [IsActive] bit NOT NULL,
         [StartAt] datetimeoffset NOT NULL,
         [ExpireAt] datetimeoffset NOT NULL,
@@ -89,7 +92,43 @@ IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'IX_Vouchers_Code' AND ob
 BEGIN
     CREATE UNIQUE INDEX [IX_Vouchers_Code] ON [Vouchers] ([Code]);
 END;
+
+IF COL_LENGTH(N'[Vouchers]', N'Scope') IS NULL
+BEGIN
+    ALTER TABLE [Vouchers] ADD [Scope] nvarchar(40) DEFAULT N'All' NOT NULL;
+    ALTER TABLE [Vouchers] ADD [CustomerId] uniqueidentifier NULL;
+END;
+
+IF OBJECT_ID(N'[Users]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [Users] (
+        [Id] uniqueidentifier NOT NULL,
+        [Email] nvarchar(180) NOT NULL,
+        [PasswordHash] nvarchar(256) NOT NULL,
+        [Role] nvarchar(40) NOT NULL,
+        [FullName] nvarchar(180) NOT NULL,
+        [IsActive] bit NOT NULL,
+        [MembershipTier] nvarchar(40) NOT NULL,
+        [TotalSpent] decimal(18,2) NOT NULL,
+        [CreatedAt] datetimeoffset NOT NULL,
+        CONSTRAINT [PK_Users] PRIMARY KEY ([Id])
+    );
+    CREATE UNIQUE INDEX [IX_Users_Email] ON [Users] ([Email]);
+END;
 """, cancellationToken);
+    }
+
+    private static async Task SeedUsersAsync(AppDbContext db, CancellationToken cancellationToken)
+    {
+        if (await db.Users.AnyAsync(cancellationToken)) return;
+
+        var now = DateTimeOffset.UtcNow;
+        db.Users.AddRange(
+            new UserEntity { Id = Guid.Parse("11111111-1111-1111-1111-111111111111"), Email = "admin@miichin.local", PasswordHash = "Admin@123", Role = "Administrator", FullName = "Quản trị MiiChin", IsActive = true, MembershipTier = "Diamond", TotalSpent = 36000000, CreatedAt = now },
+            new UserEntity { Id = Guid.Parse("22222222-2222-2222-2222-222222222222"), Email = "staff@miichin.local", PasswordHash = "Staff@123", Role = "Staff", FullName = "Nhân viên MiiChin", IsActive = true, MembershipTier = "Silver", TotalSpent = 4000000, CreatedAt = now },
+            new UserEntity { Id = Guid.Parse("33333333-3333-3333-3333-333333333333"), Email = "customer@miichin.local", PasswordHash = "Customer@123", Role = "Customer", FullName = "Khách hàng MiiChin", IsActive = true, MembershipTier = "Bronze", TotalSpent = 1500000, CreatedAt = now }
+        );
+        await db.SaveChangesAsync(cancellationToken);
     }
 
     private static async Task SeedVouchersAsync(AppDbContext db, CancellationToken cancellationToken)
@@ -113,6 +152,7 @@ END;
                 Quantity = 100,
                 UsedCount = 0,
                 ApplicableTier = "All",
+                Scope = "All",
                 IsActive = true,
                 StartAt = now.AddDays(-1),
                 ExpireAt = now.AddMonths(2)
@@ -129,6 +169,7 @@ END;
                 Quantity = 200,
                 UsedCount = 0,
                 ApplicableTier = "All",
+                Scope = "All",
                 IsActive = true,
                 StartAt = now.AddDays(-1),
                 ExpireAt = now.AddMonths(1)
@@ -145,6 +186,7 @@ END;
                 Quantity = 100,
                 UsedCount = 0,
                 ApplicableTier = "Bronze",
+                Scope = "Tier",
                 IsActive = true,
                 StartAt = now.AddDays(-1),
                 ExpireAt = now.AddMonths(2)
@@ -161,6 +203,7 @@ END;
                 Quantity = 80,
                 UsedCount = 0,
                 ApplicableTier = "Silver",
+                Scope = "Tier",
                 IsActive = true,
                 StartAt = now.AddDays(-1),
                 ExpireAt = now.AddMonths(3)
@@ -177,6 +220,7 @@ END;
                 Quantity = 50,
                 UsedCount = 0,
                 ApplicableTier = "Gold",
+                Scope = "Tier",
                 IsActive = true,
                 StartAt = now.AddDays(-1),
                 ExpireAt = now.AddMonths(3)
@@ -193,6 +237,7 @@ END;
                 Quantity = 30,
                 UsedCount = 0,
                 ApplicableTier = "Diamond",
+                Scope = "Tier",
                 IsActive = true,
                 StartAt = now.AddDays(-1),
                 ExpireAt = now.AddMonths(3)
@@ -340,7 +385,7 @@ END;
                 slug,
                 description,
                 categoryId,
-                "Michi",
+                "MiiChin",
                 material,
                 gender,
                 price,
@@ -350,7 +395,7 @@ END;
                 colors.SelectMany((color, colorIndex) =>
                     sizes.Select((size, sizeIndex) => new ProductVariantRecord(
                         StableGuid($"{slug}-{colorIndex}-{size}"),
-                        $"MICHI-{skuPrefix}-{colorIndex + 1}{size}",
+                        $"MIICHIN-{skuPrefix}-{colorIndex + 1}{size}",
                         color,
                         size,
                         price + sizeIndex * 10000,
@@ -360,10 +405,10 @@ END;
 
         return
         [
-            DemoProduct("Áo thun cotton Michi Daily", "ao-thun-cotton-michi-daily", "Áo thun cotton mềm, form vừa, cổ tròn gọn và dễ phối với quần jeans hoặc chân váy.", 1, "Cotton 100%", "Unisex", 249000, ["daily", "cotton", "minimal"], ["Đen", "Trắng"], ["M", "L"]),
+            DemoProduct("Áo thun cotton MiiChin Daily", "ao-thun-cotton-miichin-daily", "Áo thun cotton mềm, form vừa, cổ tròn gọn và dễ phối với quần jeans hoặc chân váy.", 1, "Cotton 100%", "Unisex", 249000, ["daily", "cotton", "minimal"], ["Đen", "Trắng"], ["M", "L"]),
             DemoProduct("Quần jeans ống suông xanh nhạt", "quan-jeans-ong-suong", "Chất denim đứng form, dáng ống suông thoải mái, hợp đi làm, đi học và dạo phố cuối tuần.", 2, "Denim", "Unisex", 520000, ["denim", "street", "casual"], ["Xanh denim", "Đen washed"], ["M", "L"]),
             DemoProduct("Áo khoác linen dáng ngắn", "ao-khoac-linen-dang-ngan", "Áo khoác linen nhẹ, bề mặt mềm, phù hợp phối nhiều lớp khi đi làm hoặc đi cafe.", 3, "Linen blend", "Unisex", 690000, ["outerwear", "linen", "soft-neutral"], ["Be", "Ghi"], ["M", "L"]),
-            DemoProduct("Sơ mi linen trắng Michi", "so-mi-linen-trang-michi", "Sơ mi linen trắng nhẹ, đường may tối giản, mặc riêng hoặc khoác ngoài áo thun đều đẹp.", 1, "Linen", "Unisex", 430000, ["linen", "office", "minimal"], ["Trắng", "Kem"], ["M", "L"]),
+            DemoProduct("Sơ mi linen trắng MiiChin", "so-mi-linen-trang-miichin", "Sơ mi linen trắng nhẹ, đường may tối giản, mặc riêng hoặc khoác ngoài áo thun đều đẹp.", 1, "Linen", "Unisex", 430000, ["linen", "office", "minimal"], ["Trắng", "Kem"], ["M", "L"]),
             DemoProduct("Áo polo pique cổ dệt", "ao-polo-pique-co-det", "Áo polo pique bề mặt thoáng, cổ dệt gọn, hợp đi học và đi làm casual.", 1, "Pique cotton", "Unisex", 329000, ["polo", "smart-casual", "daily"], ["Đen", "Trắng ngà", "Xám"], ["S", "M", "L"]),
             DemoProduct("Áo tank top rib mềm", "ao-tank-top-rib-mem", "Tank top rib co giãn nhẹ, mặc riêng mùa nóng hoặc làm lớp lót bên trong áo khoác.", 1, "Rib cotton", "Nữ", 199000, ["summer", "rib", "layering"], ["Đen", "Trắng", "Nâu nhạt"], ["S", "M", "L"]),
             DemoProduct("Áo croptop basic cổ vuông", "ao-croptop-basic-co-vuong", "Croptop cổ vuông, phom ôm vừa, phù hợp phối quần cạp cao hoặc chân váy chữ A.", 1, "Cotton spandex", "Nữ", 259000, ["croptop", "casual", "feminine"], ["Đen", "Trắng", "Hồng phấn"], ["S", "M", "L"]),
@@ -385,8 +430,8 @@ END;
             DemoProduct("Đầm suông cotton", "dam-suong-cotton", "Đầm suông cotton cổ tròn, phom thoải mái, mặc nhanh cho ngày bận.", 6, "Cotton", "Nữ", 520000, ["dress", "daily", "comfort"], ["Đen", "Trắng", "Xanh navy"], ["S", "M", "L"]),
             DemoProduct("Đầm sơ mi thắt eo", "dam-so-mi-that-eo", "Đầm sơ mi thắt eo, hàng nút trước, tạo dáng gọn nhưng vẫn dễ vận động.", 6, "Cotton poplin", "Nữ", 650000, ["shirt-dress", "office", "smart"], ["Trắng", "Xanh nhạt"], ["S", "M", "L"]),
             DemoProduct("Đầm hai dây satin", "dam-hai-day-satin", "Đầm hai dây satin bề mặt mịn, có thể phối cardigan hoặc blazer mỏng.", 6, "Satin", "Nữ", 590000, ["satin", "party", "layering"], ["Đen", "Champagne"], ["S", "M", "L"]),
-            DemoProduct("Nón cap thêu logo Michi", "non-cap-theu-logo-michi", "Nón cap cotton thêu logo Michi, khóa chỉnh sau, phù hợp outfit casual.", 4, "Cotton twill", "Unisex", 190000, ["cap", "accessory", "logo"], ["Đen", "Trắng", "Be"], ["FreeSize"]),
-            DemoProduct("Túi tote canvas Michi", "tui-tote-canvas-michi", "Túi tote canvas dày, quai dài, chứa vừa laptop nhỏ và đồ cá nhân.", 8, "Canvas", "Unisex", 240000, ["tote", "accessory", "daily"], ["Trắng ngà", "Đen"], ["FreeSize"]),
+            DemoProduct("Nón cap thêu logo MiiChin", "non-cap-theu-logo-miichin", "Nón cap cotton thêu logo MiiChin, khóa chỉnh sau, phù hợp outfit casual.", 4, "Cotton twill", "Unisex", 190000, ["cap", "accessory", "logo"], ["Đen", "Trắng", "Be"], ["FreeSize"]),
+            DemoProduct("Túi tote canvas MiiChin", "tui-tote-canvas-miichin", "Túi tote canvas dày, quai dài, chứa vừa laptop nhỏ và đồ cá nhân.", 8, "Canvas", "Unisex", 240000, ["tote", "accessory", "daily"], ["Trắng ngà", "Đen"], ["FreeSize"]),
             DemoProduct("Thắt lưng da basic", "that-lung-da-basic", "Thắt lưng da basic mặt kim loại tối giản, dùng tốt với quần jeans hoặc quần tây.", 4, "Da tổng hợp", "Unisex", 260000, ["belt", "accessory", "classic"], ["Đen", "Nâu"], ["FreeSize"]),
             DemoProduct("Khăn lụa vuông", "khan-lua-vuong", "Khăn lụa vuông mềm, dùng quàng cổ, buộc túi hoặc làm điểm nhấn tóc.", 4, "Poly silk", "Nữ", 220000, ["scarf", "accessory", "soft"], ["Kem", "Đen", "Nâu"], ["FreeSize"]),
             DemoProduct("Vớ cổ cao rib", "vo-co-cao-rib", "Vớ cổ cao rib co giãn, chất cotton blend thấm hút tốt.", 4, "Cotton blend", "Unisex", 69000, ["socks", "basic", "daily"], ["Trắng", "Đen", "Xám"], ["FreeSize"]),

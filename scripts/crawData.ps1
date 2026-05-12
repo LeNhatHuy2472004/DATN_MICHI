@@ -5,9 +5,10 @@
 .DESCRIPTION
   Implements doc/CRAWL_DATA_PLAN.md. For each requested product:
     1. Picks a random Vietnamese name template + category + tags.
-    2. Downloads a curated Unsplash photo (matched to category) into a temp file.
-    3. POST /api/admin/upload/image  -> backend writes to assets/uploads/products/.
-    4. POST /api/admin/products      -> persists Product + Variants in DB.
+    2. Downloads a curated photo based on generated query into a temp file.
+    3. Reviews image and supplements metadata using Gemini AI.
+    4. POST /api/admin/upload/image  -> backend writes to assets/uploads/products/.
+    5. POST /api/admin/products      -> persists Product + Variants in DB.
   Pre-flight checks: dotnet SDK, curl.exe, BE listening on :5000, assets folder
   ready, admin login works.
 
@@ -25,15 +26,23 @@
 
 .PARAMETER Verbose
   Print every API call (uses Write-Verbose under -Verbose preference).
+
+.PARAMETER GeminiApiKey
+  API Key for Gemini. Defaults to $env:GEMINI_API_KEY.
+
+.PARAMETER SkipAi
+  Skip AI verification and metadata generation.
 #>
 
 [CmdletBinding()]
 param(
   [Parameter(Position = 0)] [int]    $Count          = 30,
   [string] $ApiBase        = 'http://localhost:5000',
-  [string] $AdminEmail     = 'admin@michi.local',
+  [string] $AdminEmail     = 'admin@miichin.local',
   [string] $AdminPassword  = 'Admin@123',
-  [switch] $DryRun
+  [string] $GeminiApiKey   = $env:GEMINI_API_KEY,
+  [switch] $DryRun,
+  [switch] $SkipAi
 )
 
 $ErrorActionPreference = 'Stop'
@@ -45,10 +54,15 @@ function Warn ([string]$msg) { Write-Host "  WARN " -NoNewline -ForegroundColor 
 function Fail ([string]$msg) { Write-Host "  FAIL " -NoNewline -ForegroundColor Red;    Write-Host $msg; exit 1 }
 function Info ([string]$msg) { Write-Host "       $msg" -ForegroundColor DarkGray }
 
+function LogStage([string]$stage, [string]$msg, [ConsoleColor]$color = 'Gray') {
+  Write-Host ("[{0}] " -f $stage) -NoNewline -ForegroundColor Cyan
+  Write-Host $msg -ForegroundColor $color
+}
+
 # ============================================================
 # 0) ENVIRONMENT CHECKS
 # ============================================================
-Step "Pre-flight checks"
+LogStage "PRECHECK" "Kiểm tra môi trường"
 
 # .NET SDK
 try { $sdk = (& dotnet --version 2>$null).Trim() } catch { $sdk = $null }
@@ -61,7 +75,8 @@ if (-not $curl) { Fail "curl.exe not found. Windows 10/11 ships it under System3
 OK "curl.exe at $($curl.Source)"
 
 # Assets folder
-$assetsRoot = Join-Path $root 'assets'
+$assetsRoot = (Get-Item (Join-Path $root '..')).FullName
+$assetsRoot = Join-Path $assetsRoot 'assets'
 $uploads    = Join-Path $assetsRoot 'uploads/products'
 foreach ($d in @($assetsRoot, $uploads, (Join-Path $assetsRoot 'seed/products'))) {
   if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null; Info "created $d" }
@@ -87,15 +102,10 @@ if (-not (Test-Be -Url $ApiBase)) {
   OK "Backend responds at $ApiBase"
 }
 
-# Manifest sanity (informational)
-$manifest = Join-Path $assetsRoot 'seed/products/manifest.json'
-if (Test-Path $manifest) { OK "Seed manifest present (informational only — crawl uploads new files)" }
-else                     { Info "Seed manifest absent — fine, crawl is independent." }
-
 # ============================================================
 # 1) AUTHENTICATE AS ADMIN
 # ============================================================
-Step "Login as admin ($AdminEmail)"
+LogStage "AUTH" "Đăng nhập admin ($AdminEmail)"
 $tmp = New-Item -ItemType Directory -Force -Path (Join-Path $env:TEMP "michi-crawl-$([guid]::NewGuid().ToString('N'))")
 $loginBodyFile = Join-Path $tmp 'login.json'
 @"
@@ -117,12 +127,12 @@ if (-not $DryRun) {
 # ============================================================
 # 2) FETCH CATEGORIES (or fall back to blueprint keys for DryRun)
 # ============================================================
-Step "Loading categories"
+LogStage "CATEGORY" "Tải danh mục"
 $cats = $null
 if (-not $DryRun) {
   $catsRaw = & curl.exe -s "$ApiBase/api/catalog/categories"
   try { $cats = $catsRaw | ConvertFrom-Json } catch {}
-  if (-not $cats -or $cats.Count -lt 1) { Fail "No categories returned. Did the seed run? See doc/luong.md §5.1." }
+  if (-not $cats -or $cats.Count -lt 1) { Fail "No categories returned. Did the seed run?" }
 } else {
   # DryRun fallback: synthesize the 8 default categories matching the seed.
   $cats = @(
@@ -136,7 +146,7 @@ if (-not $DryRun) {
     [pscustomobject]@{ id = 8; name = 'Túi';       slug = 'tui' }
   )
 }
-OK "$($cats.Count) categories"
+OK "Đã tải $($cats.Count) danh mục"
 $cats | ForEach-Object { Info ("[{0}] {1}  ({2})" -f $_.id, $_.name, $_.slug) }
 
 # Map categoryId -> { keywords, namePattern }
@@ -148,7 +158,6 @@ $blueprint = @{
     Colors    = @('Trắng', 'Đen', 'Kem', 'Xám', 'Navy', 'Be', 'Hồng phấn', 'Olive')
     Sizes     = @('S', 'M', 'L', 'XL')
     Tags      = @('daily', 'minimal', 'office', 'street', 'soft')
-    Photos    = @('1521572163474-6864f9cf17ab','1489987707025-afc232f7ea0f','1620799140408-edc6dcb6d633','1485518882345-15568b007407','1556821840-3a63f95609a7','1564584217132-2271feaeb3c5','1583743814966-8936f5b7be1a','1564859228273-274232fdb516','1586790170083-2f9ceadc732d')
   }
   2 = @{
     Name      = 'Quần'
@@ -157,7 +166,6 @@ $blueprint = @{
     Colors    = @('Xanh denim', 'Đen', 'Be', 'Xám', 'Olive')
     Sizes     = @('M', 'L', 'XL')
     Tags      = @('denim', 'street', 'casual', 'comfort')
-    Photos    = @('1542272604-787c3835535d','1473966968600-fa801b22a05a','1624378439575-d8705ad7ae80','1624206112918-f140f087f9b5','1552902865-b72c031ac5ea','1591195853828-11db59a44f6b')
   }
   3 = @{
     Name      = 'Áo khoác'
@@ -166,7 +174,6 @@ $blueprint = @{
     Colors    = @('Đen', 'Be', 'Ghi', 'Olive', 'Navy')
     Sizes     = @('M', 'L', 'XL')
     Tags      = @('outerwear', 'layering', 'office')
-    Photos    = @('1551488831-00ddcb6c6bd3','1539109136881-3be0616acf4b','1591047139829-d91aecb6caea','1591047139756-eb6f88dba99a','1620799140408-edc6dcb6d633')
   }
   4 = @{
     Name      = 'Phụ kiện'
@@ -175,7 +182,6 @@ $blueprint = @{
     Colors    = @('Đen', 'Be', 'Nâu', 'Trắng')
     Sizes     = @('FreeSize')
     Tags      = @('accessory', 'classic', 'soft')
-    Photos    = @('1556905055-8f358a7a47b2','1611923134237-8e4b1eba9e23','1606760227091-3dd870d97f1d','1586350977771-b3b0abd50c82')
   }
   5 = @{
     Name      = 'Váy'
@@ -184,7 +190,6 @@ $blueprint = @{
     Colors    = @('Đen', 'Kem', 'Xanh denim', 'Nâu')
     Sizes     = @('S', 'M', 'L')
     Tags      = @('skirt', 'feminine', 'office')
-    Photos    = @('1577900232427-18219b9166a0','1583496661160-fb5886a13d77')
   }
   6 = @{
     Name      = 'Đầm'
@@ -193,7 +198,6 @@ $blueprint = @{
     Colors    = @('Đen', 'Trắng', 'Champagne', 'Xanh navy')
     Sizes     = @('S', 'M', 'L')
     Tags      = @('dress', 'feminine', 'party')
-    Photos    = @('1572804013309-59a88b7e92f1','1612722432474-b971cdcea546','1566174053879-31528523f8ae')
   }
   7 = @{
     Name      = 'Giày'
@@ -202,7 +206,6 @@ $blueprint = @{
     Colors    = @('Trắng', 'Đen', 'Nâu', 'Kem')
     Sizes     = @('38', '39', '40', '41', '42')
     Tags      = @('sneaker', 'minimal', 'classic')
-    Photos    = @('1542291026-7eec264c27ff','1606107557195-0e29a4b5b4aa','1603487742131-4160ec999306')
   }
   8 = @{
     Name      = 'Túi'
@@ -211,8 +214,38 @@ $blueprint = @{
     Colors    = @('Trắng ngà', 'Đen', 'Be')
     Sizes     = @('FreeSize')
     Tags      = @('bag', 'accessory', 'daily')
-    Photos    = @('1590874103328-eac38a683ce7')
   }
+}
+
+$colorSearchMap = @{
+  'Trắng' = 'white'
+  'Trắng ngà' = 'ivory'
+  'Đen' = 'black'
+  'Kem' = 'cream'
+  'Be' = 'beige'
+  'Xám' = 'gray'
+  'Ghi' = 'gray'
+  'Navy' = 'navy'
+  'Xanh navy' = 'navy'
+  'Xanh denim' = 'blue denim'
+  'Xanh nhạt' = 'light blue'
+  'Xanh rêu' = 'olive green'
+  'Olive' = 'olive green'
+  'Nâu' = 'brown'
+  'Nâu nhạt' = 'light brown'
+  'Hồng phấn' = 'pastel pink'
+  'Champagne' = 'champagne'
+}
+
+$categorySearchMap = @{
+  1 = 'fashion shirt top clothing'
+  2 = 'fashion pants trousers clothing'
+  3 = 'fashion jacket outerwear clothing'
+  4 = 'fashion accessory product'
+  5 = 'fashion skirt clothing'
+  6 = 'fashion dress clothing'
+  7 = 'fashion shoes footwear'
+  8 = 'fashion bag handbag tote'
 }
 
 # Validate that every category seen on BE has a blueprint entry; allow extras silently.
@@ -238,51 +271,207 @@ function Slugify([string]$s) {
 function Pick($arr) { return $arr | Get-Random }
 function PickN($arr, [int]$n) { return $arr | Get-Random -Count ([Math]::Min($n, $arr.Count)) }
 
+function Build-ImageQuery($draft) {
+  $colorEn = $colorSearchMap[$draft.color]
+  if (-not $colorEn) { $colorEn = $draft.color }
+
+  $categoryText = $categorySearchMap[[int]$draft.categoryId]
+  if (-not $categoryText) { $categoryText = 'fashion clothing product' }
+
+  return "$colorEn $($draft.material) $categoryText studio product photo"
+}
+
 function Build-ProductDraft([int]$idx) {
   $cat   = ($cats | Where-Object { $blueprint.ContainsKey([int]$_.id) } | Get-Random)
   $bp    = $blueprint[[int]$cat.id]
   $tmpl  = Pick $bp.Templates
   $mat   = Pick $bp.Materials
-  $col   = Pick $bp.Colors
-  $name  = ($tmpl -f $col.ToLower(), $mat) + " Michi"
+  $selectedColor = Pick $bp.Colors
+  $name  = ($tmpl -f $selectedColor.ToLower(), $mat) + " MiiChin"
   # Make slug unique with idx + timestamp suffix to avoid PK conflicts in repeat runs.
   $slug  = "$(Slugify $name)-$(Get-Date -Format 'HHmmss')$idx"
   $price = (Get-Random -Minimum 19 -Maximum 99) * 10000   # 190.000 — 990.000 VND
-  $variantCount = 2 + (Get-Random -Maximum 2)              # 2 or 3
-  $colors = PickN $bp.Colors $variantCount
-  $sizes  = PickN $bp.Sizes  ([Math]::Min($variantCount, $bp.Sizes.Count))
+  
+  $sizes = PickN $bp.Sizes ([Math]::Min(3, $bp.Sizes.Count))
+  $skuBase = (Slugify $name).Substring(0, [Math]::Min(8, (Slugify $name).Length)).ToUpper()
+  $skuSuffix = (Get-Date -Format 'HHmmss') + ([System.IO.Path]::GetRandomFileName().Replace('.','').Substring(0,3)).ToUpper()
   $variants = @()
-  for ($i = 0; $i -lt $variantCount; $i++) {
+  for ($i = 0; $i -lt $sizes.Count; $i++) {
     $variants += @{
-      sku       = ('MICHI-{0}-{1:D3}' -f (Slugify $name).Substring(0, [Math]::Min(8, (Slugify $name).Length)).ToUpper(), $i + 1)
-      color     = $colors[$i % $colors.Count]
-      size      = $sizes[$i % $sizes.Count]
-      price     = $price + $i * 10000
-      stockQty  = 5 + (Get-Random -Maximum 30)
+      sku      = ('MC-{0}-{1}-{2}' -f $skuBase, $sizes[$i], $skuSuffix)
+      color    = $selectedColor
+      size     = $sizes[$i]
+      price    = $price
+      stockQty = 8 + (Get-Random -Maximum 25)
     }
   }
-  return @{
-    name        = $name
-    slug        = $slug
-    description = "$($bp.Name) chất liệu $mat, màu $col, phối tốt với outfit hằng ngày."
-    categoryId  = [int]$cat.id
-    brand       = 'Michi'
-    material    = $mat
-    gender      = (Pick @('Unisex', 'Nam', 'Nữ'))
-    basePrice   = $price
-    tags        = (PickN $bp.Tags 3)
-    photoId     = (Pick $bp.Photos)
-    variants    = $variants
+
+  $draft = @{
+    name         = $name
+    slug         = $slug
+    description  = "$($bp.Name) màu $selectedColor, chất liệu $mat, phù hợp phối đồ hằng ngày."
+    categoryId   = [int]$cat.id
+    categoryName = $cat.name
+    brand        = 'MiiChin'
+    material     = $mat
+    gender       = (Pick @('Unisex', 'Nam', 'Nữ'))
+    color        = $selectedColor
+    basePrice    = $price
+    tags         = (PickN $bp.Tags 3)
+    variants     = $variants
   }
+  
+  $draft.imageQuery = Build-ImageQuery $draft
+  return $draft
 }
 
-function Download-Photo([string]$photoId, [string]$destFile) {
-  $url = "https://images.unsplash.com/photo-$photoId" + "?auto=format&fit=crop&w=720&h=900&q=80"
-  $code = & curl.exe -s -L -o "$destFile" -w '%{http_code}' --max-time 20 "$url"
-  if ($LASTEXITCODE -ne 0 -or $code -ne '200' -or -not (Test-Path $destFile) -or (Get-Item $destFile).Length -lt 1024) {
-    return $false
+function Build-FashionPrompt($draft) {
+  # Build a precise, photorealistic fashion product prompt
+  $colorEn = $colorSearchMap[$draft.color]
+  if (-not $colorEn) { $colorEn = $draft.color }
+
+  $catMap = @{
+    1 = 'fashion shirt'; 2 = 'fashion pants'; 3 = 'fashion jacket'
+    4 = 'fashion accessory'; 5 = 'fashion midi skirt'; 6 = 'fashion dress'
+    7 = 'fashion shoes sneakers'; 8 = 'fashion handbag tote bag'
   }
-  return $true
+  $catText = $catMap[[int]$draft.categoryId]
+  if (-not $catText) { $catText = 'fashion clothing' }
+
+  $prompt = "$colorEn $($draft.material) $catText, product photography, white background, studio lighting, clean minimalist, no model, high quality, fashion e-commerce"
+  return $prompt
+}
+
+function Download-PhotoByQuery([string]$query, [string]$destFile, $draft = $null) {
+  # Build a precise fashion prompt if draft is provided
+  $fashionPrompt = if ($draft) { Build-FashionPrompt $draft } else { $query }
+  $encPrompt = [uri]::EscapeDataString($fashionPrompt)
+
+  # Source 1: Pollinations.ai with precise fashion prompt
+  $seed = Get-Random -Minimum 100 -Maximum 999999
+  $url1 = "https://image.pollinations.ai/prompt/$encPrompt`?width=800&height=1000&nologo=true&seed=$seed&model=flux"
+  
+  Info "  Prompt: $fashionPrompt"
+  $code = & curl.exe -s -L -o "$destFile" -w '%{http_code}' --max-time 60 "$url1"
+  if ($LASTEXITCODE -eq 0 -and $code -eq '200' -and (Test-Path $destFile)) {
+    $sz = (Get-Item $destFile).Length
+    if ($sz -gt 5120) { return $true }
+    else { Remove-Item $destFile -Force -ErrorAction SilentlyContinue }
+  }
+
+  # Source 2: Picsum with deterministic product-like seed (fallback)
+  $picId = Get-Random -Minimum 100 -Maximum 1000
+  $url2 = "https://picsum.photos/seed/michi-$($draft.categoryId)-$picId/800/1000.jpg"
+  $code2 = & curl.exe -s -L -o "$destFile" -w '%{http_code}' --max-time 20 "$url2"
+  if ($LASTEXITCODE -eq 0 -and $code2 -eq '200' -and (Test-Path $destFile)) {
+    $sz = (Get-Item $destFile).Length
+    if ($sz -gt 5120) { return $true }
+    Remove-Item $destFile -Force -ErrorAction SilentlyContinue
+  }
+
+  return $false
+}
+
+function Invoke-GeminiProductReview {
+  param($ImageFile, $Draft, $CategoryName)
+
+  if ($SkipAi -or -not $GeminiApiKey) {
+    return @{
+      valid = $true
+      confidence = 1.0
+      detectedCategory = $CategoryName
+      detectedColor = $Draft.color
+      title = $Draft.name
+      material = $Draft.material
+      description = $Draft.description
+      tags = $Draft.tags
+      reason = 'Skipped AI validation (No Key or SkipAi flag)'
+    }
+  }
+
+  $bytes = [System.IO.File]::ReadAllBytes($ImageFile)
+  $base64 = [Convert]::ToBase64String($bytes)
+
+  $prompt = @"
+Bạn là trợ lý kiểm duyệt dữ liệu sản phẩm thời trang cho shop MiiChin.
+
+Draft:
+- Tên dự kiến: $($Draft.name)
+- Danh mục: $CategoryName
+- Màu mong muốn: $($Draft.color)
+- Chất liệu dự kiến: $($Draft.material)
+- Giới tính: $($Draft.gender)
+
+Yêu cầu:
+1. Xác định ảnh có phải sản phẩm thời trang đúng danh mục không.
+2. Xác định màu chính trong ảnh có tương đồng với màu mong muốn không.
+3. Nếu hợp lệ, viết lại title tiếng Việt tự nhiên, có màu, chất liệu hoặc kiểu dáng, có tên hãng MiiChin.
+4. Viết mô tả tiếng Việt 1-2 câu, phù hợp bán hàng.
+5. Trả về JSON thuần theo schema:
+{
+  "valid": true,
+  "confidence": 0.0,
+  "detectedCategory": "",
+  "detectedColor": "",
+  "title": "",
+  "material": "",
+  "description": "",
+  "tags": [],
+  "reason": ""
+}
+
+Nếu ảnh không khớp, đặt valid=false và nêu reason ngắn gọn.
+Không trả markdown. Không bọc JSON trong code block.
+"@
+
+  $body = @{
+    contents = @(
+      @{
+        parts = @(
+          @{ text = $prompt },
+          @{
+            inlineData = @{
+              mimeType = "image/jpeg"
+              data = $base64
+            }
+          }
+        )
+      }
+    )
+  } | ConvertTo-Json -Depth 10
+
+  $bodyFile = Join-Path $tmp ("gemini-{0}.json" -f ([guid]::NewGuid().ToString('N')))
+  Set-Content -Path $bodyFile -Value $body -Encoding UTF8
+
+  $url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+  $resp = & curl.exe -s -X POST $url `
+    -H "Content-Type: application/json" `
+    -H "x-goog-api-key: $GeminiApiKey" `
+    --data-binary "@$bodyFile"
+
+  if (-not $resp) {
+    throw "Gemini trả về response rỗng."
+  }
+
+  $json = $resp | ConvertFrom-Json
+  if (-not $json.candidates -or $json.candidates.Count -eq 0) {
+    throw "Gemini API error: $resp"
+  }
+  
+  $text = $json.candidates[0].content.parts[0].text
+  if (-not $text) {
+    throw "Gemini không trả về text hợp lệ: $resp"
+  }
+
+  $clean = $text.Trim()
+  $clean = $clean -replace '^```(?:json)?\s*', ''
+  $clean = $clean -replace '\s*```$', ''
+
+  try {
+    return ($clean | ConvertFrom-Json)
+  } catch {
+    throw "Lỗi parse JSON từ Gemini: $clean"
+  }
 }
 
 function Upload-Image([string]$file) {
@@ -291,7 +480,38 @@ function Upload-Image([string]$file) {
   try { return ($resp | ConvertFrom-Json) } catch { return $null }
 }
 
+function Assert-ProductDraftComplete {
+  param($Draft, [string]$ImageUrl)
+
+  $missing = @()
+
+  if ([string]::IsNullOrWhiteSpace($Draft.name)) { $missing += 'name' }
+  if ([string]::IsNullOrWhiteSpace($Draft.description)) { $missing += 'description' }
+  if (-not $Draft.categoryId) { $missing += 'categoryId' }
+  if ([string]::IsNullOrWhiteSpace($Draft.brand)) { $missing += 'brand' }
+  if ([string]::IsNullOrWhiteSpace($Draft.material)) { $missing += 'material' }
+  if ([string]::IsNullOrWhiteSpace($Draft.gender)) { $missing += 'gender' }
+  if (-not $Draft.basePrice -or $Draft.basePrice -le 0) { $missing += 'basePrice' }
+  if ([string]::IsNullOrWhiteSpace($ImageUrl)) { $missing += 'imageUrl' }
+  if (-not $Draft.tags -or $Draft.tags.Count -lt 1) { $missing += 'tags' }
+  if (-not $Draft.variants -or $Draft.variants.Count -lt 1) { $missing += 'variants' }
+
+  foreach ($v in $Draft.variants) {
+    if ([string]::IsNullOrWhiteSpace($v.sku)) { $missing += 'variant.sku' }
+    if ([string]::IsNullOrWhiteSpace($v.color)) { $missing += 'variant.color' }
+    if ([string]::IsNullOrWhiteSpace($v.size)) { $missing += 'variant.size' }
+    if (-not $v.price -or $v.price -le 0) { $missing += 'variant.price' }
+    if ($null -eq $v.stockQty -or $v.stockQty -lt 0) { $missing += 'variant.stockQty' }
+  }
+
+  if ($missing.Count -gt 0) {
+    throw "Draft thiếu dữ liệu bắt buộc: $($missing -join ', ')"
+  }
+}
+
 function Create-Product($draft, [string]$imageUrl) {
+  Assert-ProductDraftComplete -Draft $draft -ImageUrl $imageUrl
+
   $body = @{
     name        = $draft.name
     description = $draft.description
@@ -304,13 +524,24 @@ function Create-Product($draft, [string]$imageUrl) {
     tags        = $draft.tags
     variants    = $draft.variants
   } | ConvertTo-Json -Depth 6 -Compress
+
   $bodyFile = Join-Path $tmp ("create-{0}.json" -f $draft.slug)
   Set-Content -Path $bodyFile -Value $body -Encoding UTF8
+
   $resp = & curl.exe -s -X POST "$ApiBase/api/admin/products" `
     -H "Authorization: Bearer $token" -H "Content-Type: application/json; charset=utf-8" `
     --data-binary "@$bodyFile"
-  try { return ($resp | ConvertFrom-Json) } catch {
-    Write-Verbose "raw response: $resp"
+
+  try { 
+    $res = $resp | ConvertFrom-Json 
+    if (-not $res.id) {
+      Warn "API tạo sản phẩm thất bại."
+      Info "Response: $resp"
+    }
+    return $res
+  } catch {
+    Warn "API tạo sản phẩm thất bại."
+    Info "Response: $resp"
     return $null
   }
 }
@@ -318,39 +549,89 @@ function Create-Product($draft, [string]$imageUrl) {
 # ============================================================
 # 4) GENERATE + IMPORT LOOP
 # ============================================================
-Step "Generating $Count products"
-$success = 0; $fail = 0; $skipDownload = 0
+LogStage "SUMMARY" "Bắt đầu crawl $Count sản phẩm"
+$success = 0; $fail = 0;
 $results = @()
 
 for ($i = 1; $i -le $Count; $i++) {
   $draft = Build-ProductDraft $i
-  Write-Host ("  [{0,3}/{1}] {2}  ({3}, {4} variants)" -f $i, $Count, $draft.name, $blueprint[$draft.categoryId].Name, $draft.variants.Count)
+  LogStage "DRAFT" ("{0:D3}/{1:D3} {2}" -f $i, $Count, $draft.name)
 
   if ($DryRun) { $results += $draft; continue }
 
   $imgFile = Join-Path $tmp ("photo-$($draft.slug).jpg")
-  if (-not (Download-Photo $draft.photoId $imgFile)) {
-    Warn "      photo download failed (id=$($draft.photoId)); creating product without image"
-    $skipDownload++
-    $imageUrl = ''
-  } else {
+  $maxAttempts = 2
+  $createdThisProduct = $false
+
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    LogStage "IMAGE" ("Tạo ảnh lần {0}/{1}" -f $attempt, $maxAttempts)
+
+    $downloadOk = Download-PhotoByQuery -query $draft.imageQuery -destFile $imgFile -draft $draft
+    if (-not $downloadOk) {
+      Warn "Tải ảnh thất bại lần $attempt."
+      if ($attempt -lt $maxAttempts) { continue }
+      $fail++
+      Warn "Bỏ qua sản phẩm $($draft.name): Không tải được ảnh."
+      break
+    }
+
+    LogStage "AI" "Đang kiểm tra ảnh với Gemini" "Yellow"
+    try {
+      $ai = Invoke-GeminiProductReview -ImageFile $imgFile -Draft $draft -CategoryName $draft.categoryName
+    } catch {
+      Warn "Lỗi gọi AI: $_"
+      $ai = @{
+        valid = $true; confidence = 0.8
+        detectedCategory = $draft.categoryName; detectedColor = $draft.color
+        title = $draft.name; material = $draft.material
+        description = $draft.description; tags = $draft.tags; reason = 'AI error, using draft values'
+      }
+    }
+
+    if (-not $ai.valid) {
+      Warn "AI loại ảnh: $($ai.reason)"
+      if ($attempt -lt $maxAttempts) { continue }
+      $fail++
+      Warn "Bỏ qua sản phẩm $($draft.name): Ảnh không hợp lệ."
+      break
+    }
+
+    LogStage "AI" "Hợp lệ: màu $($ai.detectedColor), danh mục $($ai.detectedCategory), confidence $($ai.confidence)" "Green"
+
+    if ($ai.title) { $draft.name = $ai.title }
+    if ($ai.description) { $draft.description = $ai.description }
+    if ($ai.material) { $draft.material = $ai.material }
+    if ($ai.tags -and $ai.tags.Count -gt 0) { $draft.tags = $ai.tags }
+
     $up = Upload-Image $imgFile
     if (-not $up -or -not $up.url) {
-      Warn "      upload failed; creating product without image"
-      $imageUrl = ''
-    } else {
-      $imageUrl = $up.url
-      Write-Verbose "      uploaded: $imageUrl"
+      Warn "Upload ảnh thất bại lần $attempt."
+      if ($attempt -lt $maxAttempts) { continue }
+      $fail++
+      Warn "Bỏ qua sản phẩm $($draft.name): Upload thất bại."
+      break
+    }
+
+    LogStage "UPLOAD" "Upload ảnh thành công: $($up.url)" "Green"
+
+    try {
+      $created = Create-Product $draft $up.url
+      if ($created -and $created.id) {
+        $success++
+        $createdThisProduct = $true
+        LogStage "IMPORT" "Tạo sản phẩm thành công: id=$($created.id) - $($created.name)" "Green"
+        break
+      } else {
+        Warn "API trả về không có id, thử lại."
+      }
+    } catch {
+      Warn "Lỗi trong quá trình tạo sản phẩm: $_"
     }
   }
 
-  $created = Create-Product $draft $imageUrl
-  if ($created -and $created.id) {
-    $success++
-    Write-Verbose "      created id=$($created.id)"
-  } else {
+  if (-not $createdThisProduct -and $fail -eq 0) {
     $fail++
-    Warn "      create-product failed for $($draft.name)"
+    Warn "Bỏ qua sản phẩm sau $maxAttempts lần thử."
   }
 }
 
@@ -361,17 +642,17 @@ Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 # 5) SUMMARY
 # ============================================================
 Write-Host ""
-Step "Summary"
+LogStage "SUMMARY" "Hoàn tất"
 if ($DryRun) {
   OK "DryRun complete. $($results.Count) drafts generated. No API calls made."
 } else {
-  OK "Created: $success / $Count"
-  if ($fail -gt 0)         { Warn "Failed:  $fail" }
-  if ($skipDownload -gt 0) { Warn "Photo download failed for $skipDownload product(s) — created without image" }
+  OK "Thành công: $success / $Count"
+  if ($fail -gt 0) { Warn "Thất bại: $fail" }
 
   $total = & curl.exe -s "$ApiBase/api/catalog/products" | ConvertFrom-Json
-  Info ("DB total products now: {0}" -f $total.Count)
+  LogStage "SUMMARY" ("DB total products now: {0}" -f $total.Count) "Green"
 }
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Cyan
+

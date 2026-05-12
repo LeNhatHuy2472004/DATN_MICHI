@@ -128,9 +128,9 @@ public sealed class DemoStore
 
     private void SeedRuntimeData()
     {
-        var admin = new UserRecord(Guid.Parse("11111111-1111-1111-1111-111111111111"), "admin@michi.local", "Admin@123", "Administrator", "Quản trị Michi", true, "Diamond", 36000000, DateTimeOffset.UtcNow);
-        var staff = new UserRecord(Guid.Parse("22222222-2222-2222-2222-222222222222"), "staff@michi.local", "Staff@123", "Staff", "Nhân viên Michi", true, "Silver", 4000000, DateTimeOffset.UtcNow);
-        var customer = new UserRecord(Guid.Parse("33333333-3333-3333-3333-333333333333"), "customer@michi.local", "Customer@123", "Customer", "Khách hàng Michi", true, "Bronze", 1500000, DateTimeOffset.UtcNow);
+        var admin = new UserRecord(Guid.Parse("11111111-1111-1111-1111-111111111111"), "admin@miichin.local", "Admin@123", "Administrator", "Quản trị MiiChin", true, "Diamond", 36000000, DateTimeOffset.UtcNow);
+        var staff = new UserRecord(Guid.Parse("22222222-2222-2222-2222-222222222222"), "staff@miichin.local", "Staff@123", "Staff", "Nhân viên MiiChin", true, "Silver", 4000000, DateTimeOffset.UtcNow);
+        var customer = new UserRecord(Guid.Parse("33333333-3333-3333-3333-333333333333"), "customer@miichin.local", "Customer@123", "Customer", "Khách hàng MiiChin", true, "Bronze", 1500000, DateTimeOffset.UtcNow);
         Users.AddRange([admin, staff, customer]);
 
         var permissionCodes = new[]
@@ -153,7 +153,7 @@ public sealed class DemoStore
         var conversationId = Guid.NewGuid();
         Conversations.Add(new ChatConversationRecord(conversationId, customer.Id, null, staff.Id, "Open", "Tư vấn phối đồ", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow));
         ChatMessages.Add(new ChatMessageRecord(Guid.NewGuid(), conversationId, customer.Id, "Customer", "Shop tư vấn giúp mình áo thun phối với quần nào nhé?", null, false, null, DateTimeOffset.UtcNow.AddMinutes(-4)));
-        ChatMessages.Add(new ChatMessageRecord(Guid.NewGuid(), conversationId, staff.Id, "Staff", "Bạn có thể phối áo thun cotton Michi Daily với quần jeans ống suông để có set đồ gọn, mềm và dễ mặc hằng ngày.", null, false, null, DateTimeOffset.UtcNow.AddMinutes(-2)));
+        ChatMessages.Add(new ChatMessageRecord(Guid.NewGuid(), conversationId, staff.Id, "Staff", "Bạn có thể phối áo thun cotton MiiChin Daily với quần jeans ống suông để có set đồ gọn, mềm và dễ mặc hằng ngày.", null, false, null, DateTimeOffset.UtcNow.AddMinutes(-2)));
     }
 
     private static string ToPermissionName(string code) => string.Join(' ', code.Split('.', '_').Select(x => char.ToUpperInvariant(x[0]) + x[1..]));

@@ -166,6 +166,41 @@ main {
   color: var(--ink-0);
 }
 
+.account-dropdown {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 8px;
+  background: var(--ink-0);
+  border: 1px solid var(--ink-200);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  min-width: 180px;
+  padding: 8px 0;
+  z-index: 50;
+  animation: surface-enter var(--motion-fast) var(--ease-out);
+}
+.account-dropdown a, .account-dropdown button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: var(--ink-900);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+}
+.account-dropdown a:hover, .account-dropdown button:hover {
+  background: var(--ink-50);
+}
+.account-dropdown hr {
+  margin: 8px 0;
+  border: none;
+  border-top: 1px solid var(--ink-200);
+}
+
 /* ===================== Brand logo ===================== */
 .brand-logo {
   display: inline-flex;
@@ -1034,7 +1069,7 @@ select {
   transition: background 0.15s ease, color 0.15s ease;
 }
 .admin-layout aside a:hover { background: rgba(255, 255, 255, 0.08); color: var(--ink-0); }
-.admin-layout aside a.active { background: var(--ink-0); color: var(--ink-950); }
+.admin-layout aside a.active { background: var(--ink-900); color: var(--ink-0); font-weight: 800; }
 .admin-layout > div { padding: 32px; }
 .admin-layout > div > * {
   animation: surface-enter var(--motion-base) var(--ease-out) both;
@@ -1085,6 +1120,7 @@ select {
 }
 .permission-grid label:hover,
 .row-button:hover { background: var(--ink-100); border-color: var(--ink-300); }
+.row-button.selected { background: var(--ink-100); border-color: var(--ink-900); font-weight: 800; }
 .permission-grid input[type="checkbox"] {
   width: 16px; height: 16px;
   accent-color: var(--ink-950);
@@ -1227,3 +1263,10 @@ select {
   .payment-mark,
   .payment-logo { width: 68px; }
 }
+
+/* Bar Chart CSS */
+.bar-chart { display: grid; gap: 10px; }
+.bar-row { display: grid; grid-template-columns: 140px 1fr 120px; align-items: center; gap: 12px; }
+.bar-row div { height: 10px; background: var(--ink-100); overflow: hidden; border-radius: 4px; }
+.bar-row i { display: block; height: 100%; background: var(--ink-900); border-radius: 4px; }
+.bar-row span { font-size: 14px; text-overflow: ellipsis; white-space: nowrap; overflow: hidden; }
