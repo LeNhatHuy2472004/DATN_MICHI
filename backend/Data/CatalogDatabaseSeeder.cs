@@ -140,15 +140,24 @@ END;
 
     private static async Task SeedUsersAsync(AppDbContext db, CancellationToken cancellationToken)
     {
-        if (await db.Users.AnyAsync(cancellationToken)) return;
+        // Upsert seed accounts by fixed GUID so they survive even if other users exist.
+        var seedUsers = new[]
+        {
+            new UserEntity { Id = Guid.Parse("11111111-1111-1111-1111-111111111111"), Email = "admin@miichin.local", PasswordHash = "Admin@123", Role = "Administrator", FullName = "Quản trị MiiChin", IsActive = true, MembershipTier = "Diamond", TotalSpent = 36000000, CreatedAt = DateTimeOffset.UtcNow },
+            new UserEntity { Id = Guid.Parse("22222222-2222-2222-2222-222222222222"), Email = "staff@miichin.local", PasswordHash = "Staff@123", Role = "Staff", FullName = "Nhân viên MiiChin", IsActive = true, MembershipTier = "Silver", TotalSpent = 4000000, CreatedAt = DateTimeOffset.UtcNow },
+            new UserEntity { Id = Guid.Parse("33333333-3333-3333-3333-333333333333"), Email = "customer@miichin.local", PasswordHash = "Customer@123", Role = "Customer", FullName = "Khách hàng MiiChin", IsActive = true, MembershipTier = "Bronze", TotalSpent = 1500000, CreatedAt = DateTimeOffset.UtcNow },
+        };
 
-        var now = DateTimeOffset.UtcNow;
-        db.Users.AddRange(
-            new UserEntity { Id = Guid.Parse("11111111-1111-1111-1111-111111111111"), Email = "admin@miichin.local", PasswordHash = "Admin@123", Role = "Administrator", FullName = "Quản trị MiiChin", IsActive = true, MembershipTier = "Diamond", TotalSpent = 36000000, CreatedAt = now },
-            new UserEntity { Id = Guid.Parse("22222222-2222-2222-2222-222222222222"), Email = "staff@miichin.local", PasswordHash = "Staff@123", Role = "Staff", FullName = "Nhân viên MiiChin", IsActive = true, MembershipTier = "Silver", TotalSpent = 4000000, CreatedAt = now },
-            new UserEntity { Id = Guid.Parse("33333333-3333-3333-3333-333333333333"), Email = "customer@miichin.local", PasswordHash = "Customer@123", Role = "Customer", FullName = "Khách hàng MiiChin", IsActive = true, MembershipTier = "Bronze", TotalSpent = 1500000, CreatedAt = now }
-        );
-        await db.SaveChangesAsync(cancellationToken);
+        var existingIds = await db.Users
+            .Where(u => seedUsers.Select(s => s.Id).Contains(u.Id))
+            .Select(u => u.Id)
+            .ToListAsync(cancellationToken);
+
+        foreach (var u in seedUsers.Where(u => !existingIds.Contains(u.Id)))
+            db.Users.Add(u);
+
+        if (db.ChangeTracker.HasChanges())
+            await db.SaveChangesAsync(cancellationToken);
     }
 
     private static async Task SeedVouchersAsync(AppDbContext db, CancellationToken cancellationToken)

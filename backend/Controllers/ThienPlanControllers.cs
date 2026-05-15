@@ -944,7 +944,7 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
             var sku = existingSkus.Contains(v.Sku)
                 ? $"{v.Sku}-{DateTimeOffset.UtcNow:HHmmss}"
                 : v.Sku;
-            return new ProductVariantRecord(Guid.NewGuid(), sku, v.Color, v.Size, v.Price, v.StockQty, imageUrl);
+            return new ProductVariantRecord(Guid.NewGuid(), sku, v.Color, v.Size, v.Price, v.StockQty, v.ImageUrl ?? imageUrl);
         }).ToList();
 
         var product = new ProductRecord(
@@ -1571,7 +1571,7 @@ public sealed record ChangePaymentMethodRequest(Guid OrderId, string PaymentMeth
 public sealed record MarkVnPayFailedRequest(string OrderCode, string Reason);
 public sealed record UpdatePermissionsRequest(List<string> PermissionCodes);
 public sealed record CreateProductRequest(string Name, string Description, int CategoryId, string Brand, string Material, string Gender, decimal BasePrice, string ImageUrl, List<string> Tags, List<CreateProductVariantRequest> Variants);
-public sealed record CreateProductVariantRequest(string Sku, string Color, string Size, decimal Price, int StockQty);
+public sealed record CreateProductVariantRequest(string Sku, string Color, string Size, decimal Price, int StockQty, string? ImageUrl = null);
 public sealed record UpdateProductRequest(string Name, string Description, int CategoryId, string Brand, string Material, string Gender, decimal BasePrice, string? ImageUrl, bool IsActive, List<string>? Tags, List<UpdateProductVariantRequest>? Variants);
 public sealed record UpdateProductVariantRequest(Guid? Id, string Sku, string Color, string Size, decimal Price, int StockQty, string? ImageUrl);
 public sealed record UpdateOrderStatusRequest(string Status, string? ChangedBy, string? Note);

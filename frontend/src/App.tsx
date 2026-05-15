@@ -2008,6 +2008,61 @@ function AdminGate({ auth, children }: { auth: ReturnType<typeof useAuth>; child
   return children
 }
 
+type ColorEntry = { name: string; imageUrl: string }
+type MatrixCell = { price: number; stockQty: number }
+
+const CATEGORY_DEFAULT_SIZES: Record<number, string[]> = {
+  1: ['XS', 'S', 'M', 'L', 'XL', 'XXL'],
+  2: ['28', '29', '30', '31', '32', '34'],
+  3: ['XS', 'S', 'M', 'L', 'XL'],
+  4: ['Free Size'],
+  5: ['XS', 'S', 'M', 'L', 'XL'],
+  6: ['XS', 'S', 'M', 'L', 'XL'],
+  7: ['36', '37', '38', '39', '40', '41', '42'],
+  8: ['One Size'],
+}
+
+function flattenVariants(
+  productName: string,
+  colors: ColorEntry[],
+  sizes: string[],
+  matrix: Record<string, MatrixCell>,
+  basePrice: number,
+) {
+  const prefix = productName.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 5) || 'ITEM'
+  return colors
+    .filter((c) => c.name)
+    .flatMap((c, ci) =>
+      sizes.map((s) => {
+        const key = `${c.name}|||${s}`
+        const cell = matrix[key] ?? { price: basePrice, stockQty: 0 }
+        return {
+          sku: `MIICHIN-${prefix}-C${ci + 1}${s}`.slice(0, 30),
+          color: c.name,
+          size: s,
+          price: cell.price,
+          stockQty: cell.stockQty,
+          imageUrl: c.imageUrl,
+        }
+      }),
+    )
+}
+
+function parseVariantsToBuilder(
+  variants: Array<{ id?: string; sku: string; color: string; size: string; price: number; stockQty: number; imageUrl?: string }>,
+) {
+  const colorMap = new Map<string, string>()
+  const sizeOrder: string[] = []
+  const matrix: Record<string, MatrixCell> = {}
+  for (const v of variants) {
+    if (!colorMap.has(v.color)) colorMap.set(v.color, v.imageUrl ?? '')
+    if (!sizeOrder.includes(v.size)) sizeOrder.push(v.size)
+    matrix[`${v.color}|||${v.size}`] = { price: v.price, stockQty: v.stockQty }
+  }
+  const colors: ColorEntry[] = [...colorMap.entries()].map(([name, imageUrl]) => ({ name, imageUrl }))
+  return { colors, sizes: sizeOrder, matrix }
+}
+
 type ProductFormState = {
   id?: string
   name: string
@@ -2020,7 +2075,9 @@ type ProductFormState = {
   isActive: boolean
   imageUrl: string
   tags: string
-  variants: Array<{ id?: string; sku: string; color: string; size: string; price: number; stockQty: number }>
+  colors: ColorEntry[]
+  sizes: string[]
+  matrix: Record<string, MatrixCell>
 }
 
 const emptyProductForm: ProductFormState = {
@@ -2034,7 +2091,9 @@ const emptyProductForm: ProductFormState = {
   isActive: true,
   imageUrl: '',
   tags: '',
-  variants: [{ sku: '', color: '', size: 'M', price: 0, stockQty: 0 }],
+  colors: [{ name: '', imageUrl: '' }],
+  sizes: CATEGORY_DEFAULT_SIZES[1] ?? ['S', 'M', 'L', 'XL'],
+  matrix: {},
 }
 
 function AdminProducts() {
@@ -2055,10 +2114,11 @@ function AdminProducts() {
   }, [])
 
   function openCreate() {
-    setForm({ ...emptyProductForm, variants: [{ sku: `MIICHIN-${Date.now()}`, color: '', size: 'M', price: 0, stockQty: 0 }] })
+    setForm({ ...emptyProductForm, sizes: CATEGORY_DEFAULT_SIZES[1] ?? ['S', 'M', 'L', 'XL'] })
   }
 
   function openEdit(product: Product) {
+    const builder = parseVariantsToBuilder(product.variants)
     setForm({
       id: product.id,
       name: product.name,
@@ -2071,7 +2131,9 @@ function AdminProducts() {
       isActive: true,
       imageUrl: product.imageUrl,
       tags: product.tags.join(', '),
-      variants: product.variants.map((v) => ({ id: v.id, sku: v.sku, color: v.color, size: v.size, price: v.price, stockQty: v.stockQty })),
+      colors: builder.colors.length > 0 ? builder.colors : [{ name: '', imageUrl: '' }],
+      sizes: builder.sizes,
+      matrix: builder.matrix,
     })
   }
 
@@ -2085,12 +2147,25 @@ function AdminProducts() {
       headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       body,
     })
-    if (!res.ok) {
-      alert('Upload thất bại: ' + (await res.text()))
-      return
-    }
+    if (!res.ok) { alert('Upload thất bại: ' + (await res.text())); return }
     const data = await res.json() as { url: string }
     setForm({ ...form, imageUrl: data.url })
+  }
+
+  async function uploadColorImage(file: File, colorIndex: number) {
+    if (!form) return
+    const body = new FormData()
+    body.append('file', file)
+    const token = localStorage.getItem('tpc_token')
+    const res = await fetch(`${API_BASE}/api/admin/upload/image?folder=products`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      body,
+    })
+    if (!res.ok) { alert('Upload thất bại: ' + (await res.text())); return }
+    const data = await res.json() as { url: string }
+    const colors = form.colors.map((c, i) => i === colorIndex ? { ...c, imageUrl: data.url } : c)
+    setForm({ ...form, colors })
   }
 
   async function save() {
@@ -2098,6 +2173,7 @@ function AdminProducts() {
     setBusy(true)
     try {
       const tags = form.tags.split(',').map((t) => t.trim()).filter(Boolean)
+      const variants = flattenVariants(form.name, form.colors, form.sizes, form.matrix, form.basePrice)
       const payload = {
         name: form.name,
         description: form.description,
@@ -2109,7 +2185,7 @@ function AdminProducts() {
         imageUrl: form.imageUrl,
         isActive: form.isActive,
         tags,
-        variants: form.variants,
+        variants,
       }
       if (form.id) {
         await api<Product>(`/api/admin/products/${form.id}`, { method: 'PUT', body: JSON.stringify(payload) })
@@ -2136,22 +2212,6 @@ function AdminProducts() {
     } finally {
       setBusy(false)
     }
-  }
-
-  function updateVariant(index: number, patch: Partial<ProductFormState['variants'][number]>) {
-    if (!form) return
-    const variants = form.variants.map((v, i) => (i === index ? { ...v, ...patch } : v))
-    setForm({ ...form, variants })
-  }
-
-  function addVariant() {
-    if (!form) return
-    setForm({ ...form, variants: [...form.variants, { sku: `MIICHIN-${Date.now()}`, color: '', size: 'M', price: form.basePrice, stockQty: 0 }] })
-  }
-
-  function removeVariant(index: number) {
-    if (!form) return
-    setForm({ ...form, variants: form.variants.filter((_, i) => i !== index) })
   }
 
   const filtered = (products ?? []).filter(
@@ -2235,7 +2295,10 @@ function AdminProducts() {
                 </label>
                 <label className="field">
                   <span>Danh mục</span>
-                  <select value={form.categoryId} onChange={(e) => setForm({ ...form, categoryId: Number(e.target.value) })}>
+                  <select value={form.categoryId} onChange={(e) => {
+                    const newCatId = Number(e.target.value)
+                    setForm({ ...form, categoryId: newCatId, sizes: CATEGORY_DEFAULT_SIZES[newCatId] ?? ['S', 'M', 'L', 'XL'] })
+                  }}>
                     {categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
                   </select>
                 </label>
@@ -2281,38 +2344,185 @@ function AdminProducts() {
                 </div>
               </div>
 
-              <div className="variants-block">
-                <div className="variants-head">
-                  <strong>Phiên bản (color × size)</strong>
-                  <button type="button" className="button secondary compact" onClick={addVariant}>+ Thêm phiên bản</button>
-                </div>
-                <table className="admin-table compact">
-                  <thead>
-                    <tr><th>SKU</th><th>Màu</th><th>Size</th><th>Giá</th><th>Tồn</th><th></th></tr>
-                  </thead>
-                  <tbody>
-                    {form.variants.map((v, i) => (
-                      <tr key={i}>
-                        <td><input value={v.sku} onChange={(e) => updateVariant(i, { sku: e.target.value })} /></td>
-                        <td><input value={v.color} onChange={(e) => updateVariant(i, { color: e.target.value })} /></td>
-                        <td><input value={v.size} onChange={(e) => updateVariant(i, { size: e.target.value })} style={{ width: 64 }} /></td>
-                        <td><MoneyInput value={v.price} onChange={(n) => updateVariant(i, { price: n })} /></td>
-                        <td><input type="number" min={0} value={v.stockQty} onChange={(e) => updateVariant(i, { stockQty: Number(e.target.value) })} /></td>
-                        <td>
-                          {form.variants.length > 1 && (
-                            <button type="button" className="button ghost compact" onClick={() => removeVariant(i)} title="Xóa phiên bản">✕</button>
-                          )}
-                        </td>
-                      </tr>
+              {/* VARIANT BUILDER */}
+              <div className="variant-builder">
+                {/* Section 1: Colors */}
+                <div>
+                  <div className="variant-section-title">Phân loại màu sắc <span style={{ fontWeight: 400, color: 'var(--ink-500)' }}>(mỗi màu có ảnh preview riêng)</span></div>
+                  <div className="color-entry-list">
+                    {form.colors.map((c, ci) => (
+                      <div key={ci} className="color-entry">
+                        <label style={{ cursor: 'pointer', flexShrink: 0 }}>
+                          {c.imageUrl
+                            ? <img src={c.imageUrl} className="color-thumb" alt={c.name} title="Nhấn để đổi ảnh" />
+                            : <div className="color-thumb-empty" title="Nhấn để upload ảnh">🖼</div>
+                          }
+                          <input type="file" accept="image/*" style={{ display: 'none' }}
+                            onChange={(e) => e.target.files?.[0] && uploadColorImage(e.target.files[0], ci)} />
+                        </label>
+                        <input
+                          className="color-name"
+                          value={c.name}
+                          onChange={(e) => {
+                            const colors = form.colors.map((x, i) => i === ci ? { ...x, name: e.target.value } : x)
+                            setForm({ ...form, colors })
+                          }}
+                          placeholder="Tên màu (VD: Đen)"
+                        />
+                        {form.colors.length > 1 && (
+                          <button type="button" className="button ghost compact" style={{ padding: '0 4px', lineHeight: 1 }}
+                            onClick={() => setForm({ ...form, colors: form.colors.filter((_, i) => i !== ci) })}>
+                            ✕
+                          </button>
+                        )}
+                      </div>
                     ))}
-                  </tbody>
-                </table>
+                    <button type="button" className="button secondary compact"
+                      onClick={() => setForm({ ...form, colors: [...form.colors, { name: '', imageUrl: '' }] })}>
+                      + Thêm màu
+                    </button>
+                  </div>
+                </div>
+
+                {/* Section 2: Sizes */}
+                <div>
+                  <div className="variant-section-title">Phân loại size <span style={{ fontWeight: 400, color: 'var(--ink-500)' }}>(tự động gợi ý theo danh mục)</span></div>
+                  <div className="size-checkbox-group">
+                    {(CATEGORY_DEFAULT_SIZES[form.categoryId] ?? ['XS', 'S', 'M', 'L', 'XL']).map((sz) => (
+                      <label key={sz}>
+                        <input
+                          type="checkbox"
+                          checked={form.sizes.includes(sz)}
+                          onChange={(e) => {
+                            const sizes = e.target.checked
+                              ? [...form.sizes, sz]
+                              : form.sizes.filter((s) => s !== sz)
+                            setForm({ ...form, sizes })
+                          }}
+                        />
+                        {sz}
+                      </label>
+                    ))}
+                    <input
+                      placeholder="+ Tự thêm"
+                      style={{ width: 90, fontSize: 13, padding: '4px 8px', border: '1px dashed var(--ink-400)', borderRadius: 6, outline: 'none' }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          const val = e.currentTarget.value.trim()
+                          if (val && !form.sizes.includes(val)) setForm({ ...form, sizes: [...form.sizes, val] })
+                          e.currentTarget.value = ''
+                        }
+                      }}
+                    />
+                  </div>
+                  {form.sizes.length > 0 && (
+                    <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {form.sizes.map((sz) => (
+                        <span key={sz} style={{ display: 'inline-flex', alignItems: 'center', gap: 4, background: 'var(--ink-900)', color: 'var(--ink-0)', borderRadius: 6, padding: '2px 10px', fontSize: 13 }}>
+                          {sz}
+                          <button type="button" style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', padding: 0, lineHeight: 1, fontSize: 12 }}
+                            onClick={() => setForm({ ...form, sizes: form.sizes.filter((s) => s !== sz) })}>✕</button>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Section 3: Price/Stock Matrix */}
+                {form.colors.some((c) => c.name) && form.sizes.length > 0 && (
+                  <div>
+                    <div className="variant-section-title">Bảng giá / tồn kho</div>
+                    <div className="matrix-toolbar">
+                      <span style={{ fontSize: 13, color: 'var(--ink-500)' }}>Áp dụng tất cả:</span>
+                      <MoneyInput
+                        value={0}
+                        onChange={(price) => {
+                          if (!price) return
+                          const matrix = { ...form.matrix }
+                          form.colors.filter((c) => c.name).forEach((c) =>
+                            form.sizes.forEach((s) => {
+                              const key = `${c.name}|||${s}`
+                              matrix[key] = { ...(matrix[key] ?? { price: 0, stockQty: 0 }), price }
+                            }),
+                          )
+                          setForm({ ...form, matrix })
+                        }}
+                        placeholder="Giá..."
+                      />
+                      <input
+                        type="number"
+                        min={0}
+                        placeholder="Tồn..."
+                        style={{ width: 80 }}
+                        onBlur={(e) => {
+                          if (!e.target.value) return
+                          const stockQty = Number(e.target.value)
+                          const matrix = { ...form.matrix }
+                          form.colors.filter((c) => c.name).forEach((c) =>
+                            form.sizes.forEach((s) => {
+                              const key = `${c.name}|||${s}`
+                              matrix[key] = { ...(matrix[key] ?? { price: form.basePrice, stockQty: 0 }), stockQty }
+                            }),
+                          )
+                          setForm({ ...form, matrix })
+                          e.target.value = ''
+                        }}
+                      />
+                    </div>
+                    <div className="variant-matrix-wrap">
+                      <table className="variant-matrix">
+                        <thead>
+                          <tr>
+                            <th style={{ textAlign: 'left', minWidth: 120 }}>Màu \ Size</th>
+                            {form.sizes.map((s) => <th key={s}>{s}</th>)}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {form.colors.filter((c) => c.name).map((c) => (
+                            <tr key={c.name}>
+                              <td>
+                                <div className="matrix-color-cell">
+                                  {c.imageUrl
+                                    ? <img src={c.imageUrl} alt={c.name} />
+                                    : <div style={{ width: 28, height: 28, background: 'var(--ink-200)', borderRadius: 3, flexShrink: 0 }} />
+                                  }
+                                  <span style={{ fontSize: 13, fontWeight: 500 }}>{c.name}</span>
+                                </div>
+                              </td>
+                              {form.sizes.map((s) => {
+                                const key = `${c.name}|||${s}`
+                                const cell = form.matrix[key] ?? { price: form.basePrice, stockQty: 0 }
+                                return (
+                                  <td key={s}>
+                                    <div className="matrix-inputs">
+                                      <MoneyInput
+                                        value={cell.price}
+                                        onChange={(price) => setForm({ ...form, matrix: { ...form.matrix, [key]: { ...cell, price } } })}
+                                      />
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        value={cell.stockQty}
+                                        placeholder="Tồn"
+                                        onChange={(e) => setForm({ ...form, matrix: { ...form.matrix, [key]: { ...cell, stockQty: Number(e.target.value) } } })}
+                                      />
+                                    </div>
+                                  </td>
+                                )
+                              })}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 
             <footer className="modal-foot">
               <button type="button" className="button secondary" onClick={() => setForm(null)} disabled={busy}>Hủy</button>
-              <button type="button" className="button" onClick={save} disabled={busy || !form.name || form.variants.length === 0}>
+              <button type="button" className="button" onClick={save} disabled={busy || !form.name || form.colors.filter((c) => c.name).length === 0 || form.sizes.length === 0}>
                 {busy ? <Loader.Inline /> : <Check size={16} />} {form.id ? 'Cập nhật' : 'Tạo mới'}
               </button>
             </footer>
