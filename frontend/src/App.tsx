@@ -1,5 +1,5 @@
 import { HubConnectionBuilder } from '@microsoft/signalr'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, Navigate, NavLink, Route, Routes, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   Bot,
@@ -23,6 +23,9 @@ import {
   User as UserIcon,
   UserPlus,
   Ticket,
+  X,
+  ListOrdered,
+  Crown,
 } from 'lucide-react'
 
 // Brand logos are bundled by Vite — Vite hashes the URLs and serves them from the FE
@@ -53,6 +56,38 @@ const guestToken = localStorage.getItem('tpc_guest') ?? `guest-${crypto.randomUU
 localStorage.setItem('tpc_guest', guestToken)
 let pendingVnPayTab: Window | null = null
 let pendingVnPayOrderCode = ''
+const checkoutDraftKey = 'miichin_checkout_draft'
+
+type CheckoutFormState = {
+  fullName: string
+  phoneNumber: string
+  email: string
+  address: string
+  paymentMethod: string
+  shippingMethod: string
+  voucherCode: string
+}
+
+const defaultCheckoutForm = (user?: User | null): CheckoutFormState => ({
+  fullName: user?.fullName ?? '',
+  phoneNumber: '0900000000',
+  email: user?.email ?? 'guest@miichin.local',
+  address: '12 Nguyễn Trãi, Quận 1, TP.HCM',
+  paymentMethod: 'Cash',
+  shippingMethod: 'Delivery',
+  voucherCode: '',
+})
+
+function loadCheckoutDraft(user?: User | null): CheckoutFormState {
+  const fallback = defaultCheckoutForm(user)
+  try {
+    const raw = localStorage.getItem(checkoutDraftKey)
+    if (!raw) return fallback
+    return { ...fallback, ...JSON.parse(raw) }
+  } catch {
+    return fallback
+  }
+}
 
 function isBackOfficeUser(user: User | null) {
   return user?.role === 'Administrator' || user?.role === 'Staff'
@@ -145,6 +180,27 @@ type Voucher = {
   startAt: string
   expireAt: string
   isActive: boolean
+}
+
+type TryOnRecord = {
+  id: string
+  parentId?: string
+  sourceImageUrl: string
+  resultImageUrl: string
+  productIds: string[]
+  productNames: string[]
+  itemTypes: string[]
+  note: string
+  source: string
+  message: string
+  createdAt: string
+}
+
+type TryOnQuota = {
+  membershipTier: string
+  dailyLimit: number | null
+  usedToday: number
+  remainingToday: number | null
 }
 
 type Conversation = {
@@ -250,10 +306,10 @@ function useAuth() {
     return result.user
   }
 
-  async function register(email: string, password: string, fullName: string) {
+  async function register(email: string, password: string, fullName: string, otpCode: string) {
     const result = await api<{ accessToken: string; user: User }>('/api/auth/register', {
       method: 'POST',
-      body: JSON.stringify({ email, password, fullName }),
+      body: JSON.stringify({ email, password, fullName, otpCode }),
     })
     localStorage.setItem('tpc_token', result.accessToken)
     localStorage.setItem('tpc_user', JSON.stringify(result.user))
@@ -267,7 +323,15 @@ function useAuth() {
     setUser(null)
   }
 
-  return { user, login, register, logout }
+  async function refresh() {
+    try {
+      const result = await api<{ accessToken: string; user: User }>('/api/auth/me')
+      localStorage.setItem('tpc_user', JSON.stringify(result.user))
+      setUser(result.user)
+    } catch { /* ignore */ }
+  }
+
+  return { user, login, register, logout, refresh }
 }
 
 function BrandLogo({ size = 40, spinning = false, variant = 'square' }: { size?: number; spinning?: boolean; variant?: 'round' | 'square' }) {
@@ -313,6 +377,8 @@ function App() {
           <Route path="/admin/products" element={<AdminGate auth={auth}><AdminProducts /></AdminGate>} />
           <Route path="/admin/vouchers" element={<AdminGate auth={auth}><AdminVouchers /></AdminGate>} />
           <Route path="/admin/staff" element={<AdminGate auth={auth}><AdminStaff /></AdminGate>} />
+          <Route path="/admin/orders" element={<AdminGate auth={auth}><AdminOrders /></AdminGate>} />
+          <Route path="/admin/membership" element={<AdminGate auth={auth}><AdminMembership /></AdminGate>} />
           <Route path="/admin/chat" element={<AdminGate auth={auth}><AdminChat auth={auth} /></AdminGate>} />
           <Route path="/admin/_health" element={<AdminGate auth={auth}><AdminHealth /></AdminGate>} />
         </Routes>
@@ -331,11 +397,12 @@ function App() {
         <Route path="/payment/vnpay-return" element={<VnPayReturn />} />
         <Route path="/account/orders/:code" element={<OrderDetail />} />
         <Route path="/ai/outfit/:productId" element={<OutfitSuggest />} />
-        <Route path="/ai/try-on/:productId" element={<TryOn />} />
+        <Route path="/ai/try-on/:productId" element={<TryOn auth={auth} />} />
         <Route path="/login" element={<Login auth={auth} />} />
         <Route path="/register" element={<Register auth={auth} />} />
         <Route path="/account/profile" element={<AccountProfile auth={auth} />} />
         <Route path="/account/orders" element={<AccountOrders auth={auth} />} />
+        <Route path="/account/try-on" element={<TryOn auth={auth} />} />
       </Routes>
       <ChatWidget auth={auth} />
     </AppShell>
@@ -503,11 +570,15 @@ function ProductDetail({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [selected, setSelected] = useState<ProductVariant>()
   const [busy, setBusy] = useState(false)
   const [added, setAdded] = useState(false)
+  const [related, setRelated] = useState<Product[]>([])
 
   useEffect(() => {
     api<Product>(`/api/catalog/products/${slug}`).then((data) => {
       setProduct(data)
       setSelected(data.variants[0])
+      api<Product[]>(`/api/catalog/products?categoryId=${data.categoryId}&limit=8`)
+        .then(all => setRelated(all.filter(p => p.id !== data.id).slice(0, 4)))
+        .catch(() => undefined)
     })
   }, [slug])
 
@@ -527,44 +598,93 @@ function ProductDetail({ auth }: { auth: ReturnType<typeof useAuth> }) {
   if (!product || !selected) return <Loader.Page />
 
   return (
-    <section className="detail">
-      <img className="detail-image" src={selected.imageUrl || product.imageUrl} alt={product.name} />
-      <div>
-        <p className="eyebrow">{product.brand} · {product.gender}</p>
-        <h1>{product.name}</h1>
-        <p>{product.description}</p>
-        <strong className="price">{formatMoney(selected.price)}</strong>
-        <div className="chips">
-          {product.tags.map((tag) => <span key={tag}>{tag}</span>)}
-        </div>
-        <div className="variant-list">
-          {product.variants.map((variant) => (
-            <button key={variant.id} className={variant.id === selected.id ? 'selected' : ''} onClick={() => setSelected(variant)}>
-              {variant.color} / {variant.size} · còn {variant.stockQty}
+    <>
+      <section className="detail">
+        <img className="detail-image" src={selected.imageUrl || product.imageUrl} alt={product.name} />
+        <div>
+          <p className="eyebrow">{product.brand} · {product.gender}</p>
+          <h1>{product.name}</h1>
+          {product.material && <p style={{ color: 'var(--ink-500)', fontSize: 14 }}>Chất liệu: {product.material}</p>}
+          <p>{product.description}</p>
+          <strong className="price">{formatMoney(selected.price)}</strong>
+          <div className="chips">
+            {product.tags.map((tag) => <span key={tag}>{tag}</span>)}
+          </div>
+          <div className="variant-list">
+            {product.variants.map((variant) => (
+              <button key={variant.id} className={variant.id === selected.id ? 'selected' : ''} onClick={() => setSelected(variant)}>
+                {variant.color} / {variant.size} · còn {variant.stockQty}
+              </button>
+            ))}
+          </div>
+          <div className="actions">
+            <button className={`button add-cart-button ${added ? 'is-added' : ''}`} onClick={addToCart} disabled={busy}>
+              {busy ? <Loader.Inline /> : added ? <Check size={18} /> : <ShoppingBag size={18} />} {added ? 'Đã thêm vào giỏ' : 'Thêm vào giỏ'}
             </button>
-          ))}
+            <Link className="button secondary" to={`/ai/outfit/${product.id}`}>
+              <Sparkles size={18} /> AI phối đồ
+            </Link>
+            <Link className="button secondary" to={`/ai/try-on/${product.id}`}>
+              <Sparkles size={18} /> AI Thử đồ
+            </Link>
+          </div>
         </div>
-        <div className="actions">
-          <button className={`button add-cart-button ${added ? 'is-added' : ''}`} onClick={addToCart} disabled={busy}>
-            {busy ? <Loader.Inline /> : added ? <Check size={18} /> : <ShoppingBag size={18} />} {added ? 'Đã thêm vào giỏ' : 'Thêm vào giỏ'}
-          </button>
-          <Link className="button secondary" to={`/ai/outfit/${product.id}`}>
-            <Sparkles size={18} /> AI phối đồ
-          </Link>
-          <Link className="button secondary" to={`/ai/try-on/${product.id}`}>
-            <Sparkles size={18} /> AI Thử đồ
-          </Link>
-        </div>
-      </div>
-    </section>
+      </section>
+      {related.length > 0 && (
+        <section className="band">
+          <h2 style={{ marginBottom: 20 }}>Sản phẩm liên quan</h2>
+          <div className="grid four">
+            {related.map(p => (
+              <Link key={p.id} to={`/product/${p.slug}`} className="card product-card" style={{ textDecoration: 'none' }}>
+                <img src={p.imageUrl} alt={p.name} style={{ width: '100%', aspectRatio: '4/5', objectFit: 'cover' }} />
+                <div style={{ padding: '10px 8px' }}>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{p.name}</div>
+                  <div style={{ fontSize: 13, color: 'var(--ink-500)' }}>{formatMoney(p.basePrice)}</div>
+                </div>
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
+    </>
   )
 }
 
 function CartPage({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [cart, setCart] = useState<Cart>()
-  useEffect(() => {
+  const [updatingId, setUpdatingId] = useState<string>()
+
+  const fetchCart = () =>
     api<Cart>(`/api/cart?guestToken=${guestToken}${auth.user ? `&userId=${auth.user.id}` : ''}`).then(setCart)
-  }, [auth.user])
+
+  useEffect(() => { fetchCart() }, [auth.user])
+
+  async function updateQty(variantId: string, delta: number, current: number) {
+    const next = current + delta
+    setUpdatingId(variantId)
+    try {
+      const updated = await api<Cart>(`/api/cart/items/${variantId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ userId: auth.user?.id, guestToken, quantity: next }),
+      })
+      setCart(updated)
+    } finally {
+      setUpdatingId(undefined)
+    }
+  }
+
+  async function removeItem(variantId: string) {
+    setUpdatingId(variantId)
+    try {
+      const updated = await api<Cart>(
+        `/api/cart/items/${variantId}?userId=${auth.user?.id ?? ''}&guestToken=${guestToken}`,
+        { method: 'DELETE' },
+      )
+      setCart(updated)
+    } finally {
+      setUpdatingId(undefined)
+    }
+  }
 
   if (!cart) return <Loader.Page />
   return (
@@ -576,17 +696,38 @@ function CartPage({ auth }: { auth: ReturnType<typeof useAuth> }) {
           {cart.items.map((item) => (
             <article className="line-item" key={item.variantId}>
               <img src={item.imageUrl} alt={item.name} />
-              <div>
+              <div style={{ flex: 1 }}>
                 <h3>{item.name}</h3>
-                <p>{item.color} / {item.size} · {item.quantity} x {formatMoney(item.unitPrice)}</p>
+                <p>{item.color} / {item.size} · {formatMoney(item.unitPrice)}/cái</p>
+                <div className="qty-controls">
+                  <button
+                    className="button ghost icon"
+                    disabled={item.quantity <= 1 || updatingId === item.variantId}
+                    onClick={() => updateQty(item.variantId, -1, item.quantity)}
+                  >−</button>
+                  <span className="qty-value">{updatingId === item.variantId ? '…' : item.quantity}</span>
+                  <button
+                    className="button ghost icon"
+                    disabled={updatingId === item.variantId}
+                    onClick={() => updateQty(item.variantId, 1, item.quantity)}
+                  >+</button>
+                </div>
               </div>
-              <strong>{formatMoney(item.lineTotal)}</strong>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 8 }}>
+                <strong className="amount">{formatMoney(item.lineTotal)}</strong>
+                <button
+                  className="button ghost icon"
+                  title="Xóa sản phẩm"
+                  disabled={updatingId === item.variantId}
+                  onClick={() => removeItem(item.variantId)}
+                ><X size={16} /></button>
+              </div>
             </article>
           ))}
         </div>
         <aside className="summary">
           <h2>Tạm tính</h2>
-          <strong>{formatMoney(cart.subtotal)}</strong>
+          <strong className="amount">{formatMoney(cart.subtotal)}</strong>
           <Link className="button" to="/checkout">Thanh toán</Link>
         </aside>
       </div>
@@ -602,24 +743,18 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [error, setError] = useState('')
   const [accountDialogOpen, setAccountDialogOpen] = useState(false)
   const [quickPassword, setQuickPassword] = useState('')
+  const [quickOtpCode, setQuickOtpCode] = useState('')
+  const [quickOtpSent, setQuickOtpSent] = useState(false)
   const [quickAccountBusy, setQuickAccountBusy] = useState(false)
-  const [form, setForm] = useState({
-    fullName: auth.user?.fullName ?? '',
-    phoneNumber: '0900000000',
-    email: auth.user?.email ?? 'guest@miichin.local',
-    address: '12 Nguyễn Trãi, Quận 1, TP.HCM',
-    paymentMethod: 'Cash',
-    shippingMethod: 'Delivery',
-    voucherCode: '',
-  })
+  const [form, setForm] = useState<CheckoutFormState>(() => loadCheckoutDraft(auth.user))
 
   useEffect(() => {
     api<Cart>(`/api/cart?guestToken=${guestToken}${auth.user ? `&userId=${auth.user.id}` : ''}`).then(setCart)
   }, [auth.user])
 
   useEffect(() => {
-    api<Voucher[]>('/api/catalog/vouchers').then(setVouchers)
-  }, [])
+    api<Voucher[]>(auth.user ? '/api/account/vouchers' : '/api/catalog/vouchers').then(setVouchers)
+  }, [auth.user])
 
   useEffect(() => {
     if (!auth.user) return
@@ -629,6 +764,10 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
       email: current.email === 'guest@miichin.local' ? auth.user?.email ?? current.email : current.email,
     }))
   }, [auth.user])
+
+  useEffect(() => {
+    localStorage.setItem(checkoutDraftKey, JSON.stringify(form))
+  }, [form])
 
   const availableVouchers = (vouchers ?? []).filter((voucher) =>
     voucher.applicableTier === 'All' || voucher.applicableTier === auth.user?.membershipTier)
@@ -645,18 +784,44 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
     setForm({ ...form, voucherCode: code })
   }
 
-  async function createQuickAccount() {
+  async function sendQuickOtp() {
     setError('')
-    if (!form.fullName.trim() || !form.email.trim() || !quickPassword.trim()) {
-      setError('Vui lòng nhập họ tên, email và mật khẩu để tạo tài khoản.')
+    if (!form.fullName.trim() || !form.email.trim()) {
+      setError('Vui lòng nhập họ tên và email để nhận OTP.')
       return
     }
 
     setQuickAccountBusy(true)
     try {
-      await auth.register(form.email.trim(), quickPassword, form.fullName.trim())
+      await api('/api/auth/register/request-otp', {
+        method: 'POST',
+        body: JSON.stringify({ email: form.email.trim(), fullName: form.fullName.trim() }),
+      })
+      setQuickOtpSent(true)
+      setError('Mã OTP đã được gửi đến Gmail của bạn. Vui lòng kiểm tra hộp thư.')
+    } catch (e) {
+      setError((e as Error).message || 'Không thể gửi OTP.')
+    } finally {
+      setQuickAccountBusy(false)
+    }
+  }
+
+  async function createQuickAccount() {
+    setError('')
+    if (!form.fullName.trim() || !form.email.trim() || !quickPassword.trim() || !quickOtpCode.trim()) {
+      setError('Vui lòng nhập họ tên, email, mật khẩu và OTP để tạo tài khoản.')
+      return
+    }
+
+    setQuickAccountBusy(true)
+    try {
+      localStorage.setItem(checkoutDraftKey, JSON.stringify(form))
+      await auth.register(form.email.trim(), quickPassword, form.fullName.trim(), quickOtpCode.trim())
       setAccountDialogOpen(false)
       setQuickPassword('')
+      setQuickOtpCode('')
+      setQuickOtpSent(false)
+      setError('Tài khoản đã xác thực. Thông tin đơn hàng đã được giữ lại, bạn có thể tiếp tục đặt hàng.')
     } catch (e) {
       setError((e as Error).message || 'Không thể tạo tài khoản.')
     } finally {
@@ -665,10 +830,17 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
   }
 
   async function submit() {
+    if (!auth.user) {
+      localStorage.setItem(checkoutDraftKey, JSON.stringify(form))
+      setError('Vui lòng tạo tài khoản và xác thực Gmail để tiếp tục đặt hàng. Thông tin đơn hàng hiện tại đã được giữ lại.')
+      setAccountDialogOpen(true)
+      return
+    }
+
     setBusy(true)
     setError('')
     try {
-      const order = await api<Order>('/api/orders', {
+      const result = await api<{ order: Order; emailSent: boolean; emailAddress: string }>('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
           userId: auth.user?.id,
@@ -686,6 +858,11 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
           note: 'Đơn tạo từ website MiiChin',
         }),
       })
+      const order = result.order
+      localStorage.removeItem(checkoutDraftKey)
+      if (result.emailSent) {
+        setTimeout(() => alert(`📧 Email xác nhận đã gửi đến ${result.emailAddress}`), 500)
+      }
 
       if (form.paymentMethod === 'VnPay') {
         const result = await api<{ paymentUrl: string }>('/api/payments/vnpay/create-url', {
@@ -865,11 +1042,11 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
         <div className="modal-backdrop" onClick={() => !quickAccountBusy && setAccountDialogOpen(false)}>
           <div className="modal compact-modal" onClick={(e) => e.stopPropagation()}>
             <header className="modal-head">
-              <h2>Tạo tài khoản để dùng ưu đãi</h2>
+              <h2>Tạo tài khoản để tiếp tục đặt hàng</h2>
               <button type="button" className="button ghost compact" onClick={() => setAccountDialogOpen(false)}>✕</button>
             </header>
             <div className="modal-body">
-              <p className="hint">Thông tin nhận hàng sẽ được dùng để tạo tài khoản khách hàng MiiChin.</p>
+              <p className="hint">Thông tin đơn hàng hiện tại đã được lưu trên máy. Vui lòng xác thực Gmail để tạo tài khoản và tiếp tục đặt hàng.</p>
               <label className="field">
                 <span>Họ tên</span>
                 <input value={form.fullName} onChange={(e) => setForm({ ...form, fullName: e.target.value })} />
@@ -878,16 +1055,24 @@ function Checkout({ auth }: { auth: ReturnType<typeof useAuth> }) {
                 <span>Email</span>
                 <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} type="email" />
               </label>
+              <button type="button" className="button secondary" disabled={quickAccountBusy} onClick={sendQuickOtp}>
+                {quickAccountBusy ? <Loader.Inline /> : <MessageCircle size={16} />} Gửi mã OTP qua Gmail
+              </button>
+              <label className="field">
+                <span>Mã OTP</span>
+                <input value={quickOtpCode} onChange={(e) => setQuickOtpCode(e.target.value)} inputMode="numeric" maxLength={6} placeholder="Nhập 6 chữ số trong email" />
+              </label>
               <label className="field">
                 <span>Mật khẩu</span>
                 <input value={quickPassword} onChange={(e) => setQuickPassword(e.target.value)} type="password" autoComplete="new-password" />
               </label>
+              {quickOtpSent && <p className="hint">Nếu chưa thấy email, hãy kiểm tra Spam hoặc bấm gửi lại OTP.</p>}
               {error && <p className="auth-error">{error}</p>}
             </div>
             <footer className="modal-foot">
               <Link className="button secondary" to="/login">Đăng nhập</Link>
               <button type="button" className="button" disabled={quickAccountBusy} onClick={createQuickAccount}>
-                {quickAccountBusy ? <Loader.Inline /> : <Check size={16} />} Tạo tài khoản
+                {quickAccountBusy ? <Loader.Inline /> : <Check size={16} />} Xác thực và tạo tài khoản
               </button>
             </footer>
           </div>
@@ -924,8 +1109,11 @@ function VnPayReturn() {
 function OrderDetail() {
   const { code } = useParams()
   const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const [order, setOrder] = useState<Order>()
   const [paymentNotice, setPaymentNotice] = useState<{ status: 'waiting' | 'success' | 'failed'; message: string }>()
+  const [paymentActionBusy, setPaymentActionBusy] = useState<'vnpay' | 'cash' | null>(null)
+  const [paymentActionError, setPaymentActionError] = useState('')
   const waiting = searchParams.get('waitingPayment') === '1'
 
   useEffect(() => {
@@ -1007,6 +1195,50 @@ function OrderDetail() {
   }, [code, waiting])
 
   if (!order) return <Loader.Page />
+
+  async function retryVnPay() {
+    if (!order) return
+    setPaymentActionBusy('vnpay')
+    setPaymentActionError('')
+    try {
+      const result = await api<{ paymentUrl: string }>('/api/payments/vnpay/create-url', {
+        method: 'POST',
+        body: JSON.stringify({ orderId: order.id }),
+      })
+      const tab = window.open(result.paymentUrl, 'vnpay-tab')
+      pendingVnPayTab = tab
+      pendingVnPayOrderCode = order.orderCode
+      localStorage.setItem(`tpc_vnpay_pending_${order.orderCode}`, JSON.stringify({ orderCode: order.orderCode, at: Date.now() }))
+      setPaymentNotice({ status: 'waiting', message: 'Đã mở lại cổng VNPAY, vui lòng hoàn tất thanh toán ở tab mới.' })
+      navigate(`/account/orders/${order.orderCode}?waitingPayment=1`, { replace: true })
+    } catch (error) {
+      setPaymentActionError((error as Error).message || 'Không thể tạo lại liên kết thanh toán VNPAY.')
+    } finally {
+      setPaymentActionBusy(null)
+    }
+  }
+
+  async function switchToCash() {
+    if (!order) return
+    setPaymentActionBusy('cash')
+    setPaymentActionError('')
+    try {
+      const updated = await api<Order>('/api/payments/change-method', {
+        method: 'POST',
+        body: JSON.stringify({ orderId: order.id, paymentMethod: 'Cash' }),
+      })
+      setOrder(updated)
+      setPaymentNotice({ status: 'success', message: 'Đã chuyển đơn hàng sang thanh toán khi nhận hàng.' })
+      navigate(`/account/orders/${updated.orderCode}`, { replace: true })
+    } catch (error) {
+      setPaymentActionError((error as Error).message || 'Không thể chuyển phương thức thanh toán.')
+    } finally {
+      setPaymentActionBusy(null)
+    }
+  }
+
+  const canResolveFailedPayment = order.paymentStatus === 'Failed'
+
   return (
     <section className="band">
       {waiting && order.paymentStatus !== 'Paid' && order.paymentStatus !== 'Failed' && <Loader.Overlay message="Đang chờ thanh toán VNPAY" />}
@@ -1017,6 +1249,23 @@ function OrderDetail() {
             <article className={`payment-status ${paymentNotice?.status ?? 'waiting'}`}>
               <strong>{paymentNotice?.status === 'success' ? 'Thanh toán thành công' : paymentNotice?.status === 'failed' ? 'Thanh toán thất bại' : 'Đang chờ thanh toán'}</strong>
               <p>{paymentNotice?.message ?? 'Đang chờ phản hồi từ trang thanh toán VNPAY.'}</p>
+            </article>
+          )}
+          {canResolveFailedPayment && (
+            <article className="payment-actions">
+              <div>
+                <strong>Hoàn tất thanh toán</strong>
+                <p>Đơn hàng chưa được thanh toán. Bạn có thể thanh toán lại qua VNPAY hoặc chuyển sang thanh toán khi nhận hàng.</p>
+              </div>
+              <div className="row-actions">
+                <button type="button" className="button" disabled={paymentActionBusy !== null} onClick={retryVnPay}>
+                  {paymentActionBusy === 'vnpay' ? <Loader.Inline /> : <CreditCard size={16} />} Thanh toán lại VNPAY
+                </button>
+                <button type="button" className="button secondary" disabled={paymentActionBusy !== null} onClick={switchToCash}>
+                  {paymentActionBusy === 'cash' ? <Loader.Inline /> : <Truck size={16} />} Thanh toán khi nhận hàng
+                </button>
+              </div>
+              {paymentActionError && <p className="auth-error">{paymentActionError}</p>}
             </article>
           )}
           {order.items.map((item) => (
@@ -1077,67 +1326,224 @@ function OutfitSuggest() {
   )
 }
 
-function TryOn() {
+function productTryOnType(product: Product) {
+  const name = product.name.toLowerCase()
+  if (product.categoryId === 1) return 'top'
+  if (product.categoryId === 2) return 'bottom'
+  if (product.categoryId === 3) return 'outerwear'
+  if (product.categoryId === 5) return 'skirt'
+  if (product.categoryId === 6) return 'dress'
+  if (product.categoryId === 7) return 'shoes'
+  if (product.categoryId === 8) return 'bag'
+  if (product.categoryId === 4 && (name.includes('nón') || name.includes('mũ') || name.includes('cap'))) return 'hat'
+  if (product.categoryId === 4 && name.includes('thắt lưng')) return 'belt'
+  if (product.categoryId === 4 && name.includes('khăn')) return 'scarf'
+  if (product.categoryId === 4 && name.includes('vớ')) return 'socks'
+  if (product.categoryId === 4) return 'accessory'
+  return `category-${product.categoryId}`
+}
+
+function typeLabel(type: string) {
+  const labels: Record<string, string> = {
+    top: 'Áo',
+    bottom: 'Quần',
+    outerwear: 'Áo khoác',
+    skirt: 'Chân váy',
+    dress: 'Đầm',
+    shoes: 'Giày',
+    bag: 'Túi',
+    hat: 'Mũ/Nón',
+    belt: 'Thắt lưng',
+    scarf: 'Khăn',
+    socks: 'Vớ',
+    accessory: 'Phụ kiện',
+  }
+  return labels[type] ?? type
+}
+
+function TryOn({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const { productId } = useParams()
-  const [product, setProduct] = useState<Product>()
+  const [products, setProducts] = useState<Product[]>([])
+  const [selectedProductIds, setSelectedProductIds] = useState<string[]>(productId ? [productId] : [])
   const [modelImage, setModelImage] = useState<File | null>(null)
   const [previewUrl, setPreviewUrl] = useState<string>('')
+  const [baseTryOnId, setBaseTryOnId] = useState<string>('')
   const [loading, setLoading] = useState(false)
   const [resultUrl, setResultUrl] = useState<string>('')
   const [message, setMessage] = useState<string>('')
+  const [error, setError] = useState<string>('')
+  const [note, setNote] = useState('')
+  const [history, setHistory] = useState<TryOnRecord[]>([])
+  const [quota, setQuota] = useState<TryOnQuota>()
 
   useEffect(() => {
-    api<Product>(`/api/catalog/products/${productId}`).then(setProduct).catch(() => {})
-  }, [productId])
+    api<Product[]>('/api/catalog/products')
+      .then((rows) => setProducts(rows))
+      .catch(() => setError('Không tải được thông tin sản phẩm.'))
+  }, [])
+
+  useEffect(() => {
+    if (!auth.user) return
+    api<TryOnRecord[]>('/api/ai/try-on/history').then(setHistory).catch(() => undefined)
+    api<TryOnQuota>('/api/ai/try-on/quota').then(setQuota).catch(() => undefined)
+  }, [auth.user])
+
+  const selectedProducts = selectedProductIds
+    .map((id) => products.find((item) => item.id === id))
+    .filter((item): item is Product => Boolean(item))
+  const selectedCategoryIds = selectedProducts.map((product) => product.categoryId)
+  const remainingText = quota?.dailyLimit === null ? 'Không giới hạn' : `${quota?.remainingToday ?? 0}/${quota?.dailyLimit ?? 0}`
+
+  function addProduct(id: string) {
+    const product = products.find((item) => item.id === id)
+    if (!product || selectedProductIds.includes(id)) return
+    if (selectedCategoryIds.includes(product.categoryId)) {
+      setError(`Mỗi lần phối chỉ được chọn một sản phẩm trong cùng danh mục. Hãy bỏ món cũ trước khi chọn món khác cùng category.`)
+      return
+    }
+    setSelectedProductIds([...selectedProductIds, id])
+    setError('')
+  }
+
+  function removeProduct(id: string) {
+    setSelectedProductIds(selectedProductIds.filter((item) => item !== id))
+  }
 
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
       const file = e.target.files[0]
+      if (!file.type.startsWith('image/')) {
+        setError('Vui lòng chọn đúng file ảnh.')
+        return
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError('Ảnh tối đa 10MB.')
+        return
+      }
       setModelImage(file)
+      if (previewUrl) URL.revokeObjectURL(previewUrl)
       setPreviewUrl(URL.createObjectURL(file))
+      setBaseTryOnId('')
+      setResultUrl('')
+      setError('')
+      setMessage('')
     }
   }
 
   const handleTryOn = async () => {
-    if (!modelImage || !productId) return
+    if (!auth.user) {
+      setError('Vui lòng đăng nhập để dùng AI thử đồ.')
+      return
+    }
+    if (selectedProductIds.length === 0) {
+      setError('Vui lòng chọn ít nhất một sản phẩm để phối.')
+      return
+    }
+    if (!modelImage && !baseTryOnId) {
+      setError('Vui lòng tải ảnh người mẫu/của bạn hoặc chọn một ảnh cũ để chỉnh tiếp.')
+      return
+    }
+
     setLoading(true)
+    setError('')
     setMessage('Đang xử lý hình ảnh với AI...')
     try {
       const formData = new FormData()
-      formData.append('productId', productId)
-      formData.append('modelImage', modelImage)
-      const res = await fetch('http://localhost:5242/api/ai/try-on', {
+      formData.append('productIds', selectedProductIds.join(','))
+      if (modelImage) formData.append('modelImage', modelImage)
+      if (baseTryOnId) formData.append('baseTryOnId', baseTryOnId)
+      formData.append('note', note)
+      const token = localStorage.getItem('tpc_token')
+      const res = await fetch(`${API_BASE}/api/ai/try-on`, {
         method: 'POST',
-        body: formData
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        body: formData,
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.message || 'Lỗi thử đồ')
+      if (!data.imageUrl) {
+        throw new Error(data.message || 'OpenAI chưa trả về ảnh thử đồ.')
+      }
       setResultUrl(data.imageUrl)
-      setMessage(data.message)
-    } catch (err: any) {
-      setMessage(err.message)
+      setMessage(data.message || 'Đã xử lý ảnh thử đồ.')
+      if (data.tryOn) setHistory([data.tryOn, ...history])
+      if (data.quota) setQuota(data.quota)
+    } catch (err) {
+      setError((err as Error).message || 'Không thể tạo ảnh thử đồ.')
+      setMessage('')
     } finally {
       setLoading(false)
     }
   }
 
-  if (!product) return <Loader.Page />
+  if (!auth.user) {
+    return (
+      <section className="band">
+        <SectionTitle icon={<Bot />} title="AI Thử Đồ" />
+        <article className="card">
+          <h3>Đăng nhập để dùng AI thử đồ</h3>
+          <p>Ảnh thử đồ sẽ được lưu riêng trong tài khoản của bạn và chỉ tài khoản này xem lại được.</p>
+          <Link className="button" to="/login">Đăng nhập</Link>
+        </article>
+      </section>
+    )
+  }
+
+  if (products.length === 0 && error) {
+    return (
+      <section className="band">
+        <SectionTitle icon={<Bot />} title="AI Thử Đồ" />
+        <p className="auth-error">{error}</p>
+        <Link className="button secondary" to="/shop">Quay lại cửa hàng</Link>
+      </section>
+    )
+  }
+  if (products.length === 0) return <Loader.Page />
 
   return (
     <section className="band">
       <SectionTitle icon={<Bot />} title="AI Thử Đồ" />
-      <p className="hint">Sản phẩm: {product.name}</p>
+      <p className="hint">Hạng {quota?.membershipTier ?? auth.user.membershipTier}: còn {remainingText} lượt hôm nay. Bronze 2 lượt/ngày, Gold 10 lượt/ngày, Diamond không giới hạn.</p>
 
       <div className="grid two" style={{ gap: '30px', marginTop: '30px' }}>
         <article className="card" style={{ padding: '20px' }}>
+          <h3>Sản phẩm phối trên ảnh</h3>
+          <p className="hint">Có thể chọn nhiều món, nhưng mỗi category chỉ được chọn một sản phẩm.</p>
+          <select value="" onChange={(e) => addProduct(e.target.value)}>
+            <option value="">Thêm sản phẩm vào outfit</option>
+            {products.map((product) => {
+              const type = productTryOnType(product)
+              const disabled = selectedCategoryIds.includes(product.categoryId) || selectedProductIds.includes(product.id)
+              return <option key={product.id} value={product.id} disabled={disabled}>{typeLabel(type)} · {product.name}</option>
+            })}
+          </select>
+          <div className="list" style={{ marginTop: 16 }}>
+            {selectedProducts.map((product) => (
+              <article className="line-item" key={product.id}>
+                <img src={product.imageUrl} alt={product.name} />
+                <div>
+                  <h3>{product.name}</h3>
+                  <p>{typeLabel(productTryOnType(product))} · {product.material}</p>
+                </div>
+                <button type="button" className="button ghost compact" onClick={() => removeProduct(product.id)}>Bỏ</button>
+              </article>
+            ))}
+            {selectedProducts.length === 0 && <p className="hint">Chọn áo, quần, chân váy, mũ hoặc phụ kiện. Mỗi category chỉ được chọn một món.</p>}
+          </div>
+        </article>
+
+        <article className="card" style={{ padding: '20px' }}>
           <h3>Tải ảnh người mẫu / của bạn lên</h3>
-          <p>Tối đa 10MB, nên dùng ảnh chụp thẳng, rõ người.</p>
+          <p>Tối đa 10MB, nên dùng ảnh chụp thẳng, rõ người. Bạn cũng có thể chọn ảnh đã tạo bên dưới để chỉnh tiếp.</p>
           <input type="file" accept="image/*" onChange={handleImageChange} style={{ margin: '15px 0' }} />
           {previewUrl && <img src={previewUrl} alt="Preview" style={{ width: '100%', borderRadius: '8px', marginBottom: '15px' }} />}
-          <button className="button primary" disabled={!modelImage || loading} onClick={handleTryOn}>
+          {baseTryOnId && <p className="hint">Đang chỉnh tiếp từ ảnh đã lưu.</p>}
+          <textarea rows={3} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Ví dụ: bỏ mũ, thêm áo khoác, giữ nguyên khuôn mặt và nền ảnh" />
+          <button className="button primary" disabled={(!modelImage && !baseTryOnId) || loading} onClick={handleTryOn}>
             {loading ? 'Đang tạo ảnh...' : 'Bắt đầu thử đồ'}
           </button>
           {message && <p style={{ marginTop: '15px', color: 'var(--ink-700)' }}>{message}</p>}
+          {error && <p className="auth-error">{error}</p>}
         </article>
 
         <article className="card" style={{ padding: '20px' }}>
@@ -1150,6 +1556,31 @@ function TryOn() {
             </div>
           )}
         </article>
+      </div>
+      <div style={{ marginTop: 40 }}>
+        <SectionTitle icon={<Sparkles />} title="Ảnh AI đã lưu" />
+        <div className="product-grid">
+          {history.map((item) => (
+            <article className="product-card" key={item.id}>
+              <img src={item.resultImageUrl} alt="Ảnh AI thử đồ" />
+              <div>
+                <p>{new Date(item.createdAt).toLocaleString('vi-VN')}</p>
+                <h3>{item.productNames.join(' + ')}</h3>
+                <p>{item.itemTypes.map(typeLabel).join(', ')}</p>
+              </div>
+              <button type="button" className="button secondary compact" onClick={() => {
+                setBaseTryOnId(item.id)
+                setPreviewUrl(item.resultImageUrl)
+                setModelImage(null)
+                setResultUrl('')
+                setMessage('Đã chọn ảnh cũ để chỉnh tiếp.')
+              }}>
+                Chỉnh tiếp ảnh này
+              </button>
+            </article>
+          ))}
+          {history.length === 0 && <p className="hint">Chưa có ảnh thử đồ nào trong tài khoản.</p>}
+        </div>
       </div>
     </section>
   )
@@ -1221,23 +1652,42 @@ function Register({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [fullName, setFullName] = useState('')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [otpCode, setOtpCode] = useState('')
+  const [otpSent, setOtpSent] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  async function submit() {
-    if (!fullName || !email || !password) {
-      setError('Vui lòng nhập đủ họ tên, email và mật khẩu.')
+  async function sendOtp() {
+    if (!fullName || !email) {
+      setError('Vui lòng nhập họ tên và email để nhận OTP.')
       return
     }
     setBusy(true)
     setError(null)
     try {
-      await api('/api/auth/register', {
+      await api('/api/auth/register/request-otp', {
         method: 'POST',
-        body: JSON.stringify({ fullName, email, password }),
+        body: JSON.stringify({ fullName, email }),
       })
-      await auth.login(email, password)
-      navigate('/')
+      setOtpSent(true)
+      setError('Mã OTP đã được gửi đến Gmail của bạn. Vui lòng kiểm tra hộp thư.')
+    } catch (e) {
+      setError((e as Error).message || 'Không thể gửi OTP.')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function submit() {
+    if (!fullName || !email || !password || !otpCode) {
+      setError('Vui lòng nhập đủ họ tên, email, mật khẩu và OTP.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      await auth.register(email, password, fullName, otpCode)
+      navigate(localStorage.getItem(checkoutDraftKey) ? '/checkout' : '/')
     } catch (e) {
       setError((e as Error).message || 'Đăng ký thất bại.')
     } finally {
@@ -1264,6 +1714,17 @@ function Register({ auth }: { auth: ReturnType<typeof useAuth> }) {
         autoComplete="email"
         onKeyDown={(e) => e.key === 'Enter' && submit()}
       />
+      <button type="button" className="button secondary" disabled={busy} onClick={sendOtp}>
+        {busy ? <Loader.Inline /> : <MessageCircle size={18} />} Gửi mã OTP qua Gmail
+      </button>
+      <input
+        value={otpCode}
+        onChange={(e) => setOtpCode(e.target.value)}
+        inputMode="numeric"
+        maxLength={6}
+        placeholder="Mã OTP"
+        onKeyDown={(e) => e.key === 'Enter' && submit()}
+      />
       <input
         value={password}
         onChange={(e) => setPassword(e.target.value)}
@@ -1272,6 +1733,7 @@ function Register({ auth }: { auth: ReturnType<typeof useAuth> }) {
         autoComplete="new-password"
         onKeyDown={(e) => e.key === 'Enter' && submit()}
       />
+      {otpSent && <p className="hint">Mã OTP có hiệu lực trong 10 phút. Nếu chưa thấy email, hãy kiểm tra Spam.</p>}
       {error && <p className="auth-error">{error}</p>}
       <button type="button" className="button" disabled={busy} onClick={submit}>
         {busy ? <Loader.Inline /> : <UserPlus size={18} />} Tạo tài khoản
@@ -1296,6 +1758,7 @@ function AccountMenu({ auth }: { auth: ReturnType<typeof useAuth> }) {
         <div className="account-dropdown">
           <Link to="/account/profile" onClick={() => setOpen(false)}>Hồ sơ cá nhân</Link>
           <Link to="/account/orders" onClick={() => setOpen(false)}>Đơn hàng</Link>
+          <Link to="/account/try-on" onClick={() => setOpen(false)}>Ảnh AI thử đồ</Link>
           <hr />
           <button onClick={() => { setOpen(false); auth.logout() }}>Đăng xuất</button>
         </div>
@@ -1306,11 +1769,44 @@ function AccountMenu({ auth }: { auth: ReturnType<typeof useAuth> }) {
 
 function AccountProfile({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [vouchers, setVouchers] = useState<Voucher[]>([])
+  const [editing, setEditing] = useState(false)
+  const [fullName, setFullName] = useState('')
+  const [email, setEmail] = useState('')
+  const [saveBusy, setSaveBusy] = useState(false)
+  const [saveError, setSaveError] = useState('')
+
   useEffect(() => {
-    if (auth.user) api<Voucher[]>('/api/account/vouchers').then(setVouchers)
+    if (auth.user) {
+      api<Voucher[]>('/api/account/vouchers').then(setVouchers)
+      setFullName(auth.user.fullName)
+      setEmail(auth.user.email)
+    }
   }, [auth.user])
 
   if (!auth.user) return <Navigate to="/login" replace />
+
+  const eligibleVouchers = vouchers.filter(
+    v => v.applicableTier === 'All' || v.applicableTier === auth.user?.membershipTier
+  )
+  const hiddenCount = vouchers.length - eligibleVouchers.length
+
+  async function saveProfile() {
+    setSaveError('')
+    setSaveBusy(true)
+    try {
+      await api('/api/account/me', {
+        method: 'PATCH',
+        body: JSON.stringify({ fullName: fullName.trim(), email: email.trim() }),
+      })
+      setEditing(false)
+      // Reload user info
+      await auth.refresh()
+    } catch (e) {
+      setSaveError((e as Error).message || 'Không thể cập nhật thông tin.')
+    } finally {
+      setSaveBusy(false)
+    }
+  }
 
   return (
     <section className="band">
@@ -1318,36 +1814,53 @@ function AccountProfile({ auth }: { auth: ReturnType<typeof useAuth> }) {
       <div className="split">
         <div className="list">
           <article className="card">
-            <h3>Thông tin tài khoản</h3>
-            <div className="form-grid" style={{ marginTop: 16 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3 style={{ margin: 0 }}>Thông tin tài khoản</h3>
+              {!editing
+                ? <button className="button secondary" style={{ height: 32, fontSize: 12 }} onClick={() => setEditing(true)}>Chỉnh sửa</button>
+                : <div style={{ display: 'flex', gap: 8 }}>
+                    <button className="button ghost" style={{ height: 32, fontSize: 12 }} onClick={() => { setEditing(false); setSaveError('') }}>Hủy</button>
+                    <button className="button" style={{ height: 32, fontSize: 12 }} disabled={saveBusy} onClick={saveProfile}>{saveBusy ? <Loader.Inline size={14} /> : 'Lưu'}</button>
+                  </div>
+              }
+            </div>
+            {saveError && <p className="auth-error">{saveError}</p>}
+            <div className="form-grid">
               <label className="field">
                 <span>Họ và tên</span>
-                <input value={auth.user.fullName} disabled />
+                <input value={editing ? fullName : auth.user.fullName} disabled={!editing}
+                  onChange={e => setFullName(e.target.value)} />
               </label>
               <label className="field">
                 <span>Email</span>
-                <input value={auth.user.email} disabled />
+                <input value={editing ? email : auth.user.email} disabled={!editing}
+                  onChange={e => setEmail(e.target.value)} />
               </label>
             </div>
           </article>
         </div>
         <aside className="summary">
           <h3>Hạng thành viên: <strong>{auth.user.membershipTier}</strong></h3>
-          <p>Chi tiêu tích luỹ: <strong>{formatMoney(auth.user.totalSpent ?? 0)}</strong></p>
+          <p>Chi tiêu tích luỹ: <strong className="amount">{formatMoney(auth.user.totalSpent ?? 0)}</strong></p>
         </aside>
       </div>
 
       <div style={{ marginTop: 48 }}>
         <SectionTitle icon={<Ticket />} title="Voucher của bạn" />
+        {hiddenCount > 0 && (
+          <p className="hint" style={{ marginBottom: 12 }}>
+            Có {hiddenCount} voucher dành cho hạng cao hơn — nâng cấp để mở khóa thêm ưu đãi.
+          </p>
+        )}
         <div className="grid three">
-          {vouchers.map(v => (
+          {eligibleVouchers.map(v => (
             <article className="card" key={v.id}>
               <strong>{v.code}</strong>
               <p>{v.name}</p>
               <small>HSD: {new Date(v.expireAt).toLocaleDateString('vi-VN')}</small>
             </article>
           ))}
-          {vouchers.length === 0 && <p className="hint">Chưa có voucher nào khả dụng.</p>}
+          {eligibleVouchers.length === 0 && <p className="hint">Chưa có voucher nào khả dụng.</p>}
         </div>
       </div>
     </section>
@@ -1367,15 +1880,16 @@ function AccountOrders({ auth }: { auth: ReturnType<typeof useAuth> }) {
       <SectionTitle icon={<ShoppingBag />} title="Đơn hàng của tôi" />
       <div className="list">
         {orders.map(o => (
-          <Link key={o.id} to={`/account/orders/${o.orderCode}`} className="card" style={{ display: 'flex', justifyContent: 'space-between', textDecoration: 'none', color: 'inherit' }}>
+          <Link key={o.id} to={`/account/orders/${o.orderCode}`} className="card" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', textDecoration: 'none', color: 'inherit' }}>
             <div>
               <strong>{o.orderCode}</strong>
-              <p>{new Date(o.history[0]?.changedAt).toLocaleString('vi-VN')} · {o.items.length} sản phẩm</p>
+              <p style={{ marginTop: 4 }}>{new Date(o.createdAt).toLocaleString('vi-VN')} · {o.items.length} sản phẩm</p>
+              <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+                <span className={`status-badge ${o.orderStatus?.toLowerCase()}`}>{o.orderStatus}</span>
+                <span className={`status-badge ${o.paymentStatus?.toLowerCase()}`}>{o.paymentStatus}</span>
+              </div>
             </div>
-            <div style={{ textAlign: 'right' }}>
-              <strong style={{ border: 'none', padding: 0 }}>{formatMoney(o.total)}</strong>
-              <p>{o.orderStatus} · {o.paymentStatus}</p>
-            </div>
+            <strong className="amount" style={{ fontSize: 18 }}>{formatMoney(o.total)}</strong>
           </Link>
         ))}
         {orders.length === 0 && <p className="hint">Chưa có đơn hàng nào.</p>}
@@ -2059,49 +2573,261 @@ function AdminStaff() {
 
 function AdminChat({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [conversations, setConversations] = useState<Conversation[]>()
+  const [active, setActive] = useState<Conversation | null>(null)
+  const [messages, setMessages] = useState<ChatMessage[]>([])
+  const [content, setContent] = useState('')
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+
   useEffect(() => {
-    api<Conversation[]>('/api/chat/conversations').then(setConversations)
+    api<Conversation[]>('/api/admin/chat/conversations').then(rows => {
+      setConversations(rows)
+      if (rows[0] && !active) setActive(rows[0])
+    })
   }, [])
+
+  useEffect(() => {
+    if (!active) return
+    api<ChatMessage[]>(`/api/chat/conversations/${active.id}/messages`).then(setMessages)
+  }, [active?.id])
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages])
+
+  async function send() {
+    if (!active || !content.trim()) return
+    const message = await api<ChatMessage>(`/api/chat/conversations/${active.id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ senderId: auth.user?.id, senderType: auth.user?.role ?? 'Staff', content, attachmentUrl: null }),
+    })
+    setMessages(prev => [...prev, message])
+    setContent('')
+  }
+
   return (
     <AdminLayout>
       <SectionTitle icon={<MessageCircle />} title="Hộp thư tư vấn" />
-      <div className="grid">
-        {conversations?.map((conversation) => <ConversationBox key={conversation.id} conversation={conversation} auth={auth} />)}
+      <div className="admin-chat-inbox">
+        <aside className="inbox-list">
+          {!conversations && <Loader.Skeleton rows={4} />}
+          {conversations?.map(c => (
+            <button key={c.id} type="button"
+              className={`inbox-item ${active?.id === c.id ? 'active' : ''}`}
+              onClick={() => setActive(c)}>
+              <strong>{c.subject || 'Hội thoại'}</strong>
+              <span className={`status-badge ${c.status?.toLowerCase()}`} style={{ fontSize: 11 }}>{c.status}</span>
+            </button>
+          ))}
+          {conversations?.length === 0 && <p style={{ padding: 16, color: 'var(--ink-500)', fontSize: 13 }}>Chưa có hội thoại nào.</p>}
+        </aside>
+        <div className="inbox-chat">
+          {!active ? (
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--ink-400)' }}>
+              Chọn hội thoại để bắt đầu
+            </div>
+          ) : (
+            <>
+              <div className="inbox-chat-header">
+                <strong>{active.subject || 'Hội thoại'}</strong>
+                <span className={`status-badge ${active.status?.toLowerCase()}`}>{active.status}</span>
+              </div>
+              <div className="messages inbox-messages">
+                {messages.map(m => (
+                  <p key={m.id} className={m.senderType === 'Staff' || m.senderType === 'Administrator' ? 'msg-staff' : 'msg-customer'}>
+                    <strong>{m.senderType}:</strong> {m.content}
+                  </p>
+                ))}
+                <div ref={messagesEndRef} />
+              </div>
+              <div className="toolbar">
+                <input value={content} onChange={e => setContent(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && send()}
+                  placeholder="Nhập phản hồi..." />
+                <button type="button" className="button compact" onClick={send}>Gửi</button>
+              </div>
+            </>
+          )}
+        </div>
       </div>
     </AdminLayout>
   )
 }
 
-function ConversationBox({ conversation, auth }: { conversation: Conversation; auth: ReturnType<typeof useAuth> }) {
-  const [messages, setMessages] = useState<ChatMessage[]>()
-  const [content, setContent] = useState('')
-  useEffect(() => {
-    api<ChatMessage[]>(`/api/chat/conversations/${conversation.id}/messages`).then(setMessages)
-  }, [conversation.id])
+const ORDER_STATUSES = ['All', 'Pending', 'Confirmed', 'Packing', 'Shipping', 'Delivered', 'Cancelled']
+const ORDER_TRANSITIONS: Record<string, string[]> = {
+  Pending: ['Confirmed', 'Cancelled'],
+  Confirmed: ['Packing', 'Cancelled'],
+  Packing: ['Shipping'],
+  Shipping: ['Delivered'],
+}
 
-  async function send() {
-    if (!content.trim()) return
-    const message = await api<ChatMessage>(`/api/chat/conversations/${conversation.id}/messages`, {
-      method: 'POST',
-      body: JSON.stringify({ senderId: auth.user?.id, senderType: auth.user?.role ?? 'Staff', content, attachmentUrl: null }),
-    })
-    setMessages([...(messages ?? []), message])
-    setContent('')
+type AdminOrder = Order & { userId?: string; guestInfo?: { fullName: string; email: string; phoneNumber: string }; note?: string }
+
+function AdminOrders() {
+  const [orders, setOrders] = useState<AdminOrder[]>()
+  const [filter, setFilter] = useState('All')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [selected, setSelected] = useState<AdminOrder | null>(null)
+
+  async function reload() {
+    const data = await api<AdminOrder[]>('/api/admin/orders')
+    setOrders(data)
   }
 
+  useEffect(() => { reload() }, [])
+
+  async function changeStatus(orderId: string, newStatus: string) {
+    setBusy(orderId)
+    try {
+      await api(`/api/admin/orders/${orderId}/status`, { method: 'PATCH', body: JSON.stringify({ status: newStatus }) })
+      await reload()
+      if (selected?.id === orderId) setSelected(s => s ? { ...s, orderStatus: newStatus } : s)
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const visible = orders?.filter(o => filter === 'All' || o.orderStatus === filter) ?? []
+
   return (
-    <article className="card chat-card">
-      <h3>{conversation.subject}</h3>
-      <div className="messages">
-        {messages?.map((message) => (
-          <p key={message.id}><strong>{message.senderType}:</strong> {message.content}</p>
+    <AdminLayout>
+      <SectionTitle icon={<ListOrdered />} title="Quản lý đơn hàng" />
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16 }}>
+        {ORDER_STATUSES.map(s => (
+          <button key={s} type="button" className={`button compact ${filter === s ? '' : 'ghost'}`} onClick={() => setFilter(s)}>{s}</button>
         ))}
       </div>
-      <div className="toolbar">
-        <input value={content} onChange={(e) => setContent(e.target.value)} placeholder="Nhập phản hồi" />
-        <button className="button compact" onClick={send}>Gửi</button>
+      {!orders ? <Loader.Page /> : (
+        <div className="list">
+          {visible.length === 0 && <p style={{ color: 'var(--ink-500)', padding: 16 }}>Không có đơn hàng nào.</p>}
+          {visible.map(o => (
+            <article key={o.id} className="card" style={{ padding: '14px 18px', cursor: 'pointer', borderLeft: `4px solid var(--ink-${o.orderStatus === 'Delivered' ? '900' : o.orderStatus === 'Cancelled' ? '400' : '600'})` }} onClick={() => setSelected(o)}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <strong>#{o.orderCode}</strong>
+                  {(o.guestInfo?.fullName) && <span style={{ marginLeft: 10, color: 'var(--ink-500)', fontSize: 13 }}>{o.guestInfo.fullName}</span>}
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                  <span className={`status-badge ${o.orderStatus?.toLowerCase()}`}>{o.orderStatus}</span>
+                  <span className={`status-badge ${o.paymentStatus?.toLowerCase()}`}>{o.paymentStatus}</span>
+                  <strong className="amount">{formatMoney(o.total)}</strong>
+                  <span style={{ color: 'var(--ink-500)', fontSize: 12 }}>{o.paymentMethod}</span>
+                </div>
+              </div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                {(ORDER_TRANSITIONS[o.orderStatus] ?? []).map(next => (
+                  <button key={next} type="button" className="button compact secondary" disabled={busy === o.id}
+                    onClick={e => { e.stopPropagation(); changeStatus(o.id, next) }}>
+                    {busy === o.id ? <Loader.Inline size={14} /> : next}
+                  </button>
+                ))}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <div className="modal-backdrop" onClick={() => setSelected(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()} style={{ maxWidth: 560 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+              <h3>Đơn #{selected.orderCode}</h3>
+              <button type="button" className="button ghost icon" onClick={() => setSelected(null)}><X size={18} /></button>
+            </div>
+            <p><strong>Trạng thái:</strong> <span className={`status-badge ${selected.orderStatus?.toLowerCase()}`}>{selected.orderStatus}</span></p>
+            <p><strong>Thanh toán:</strong> <span className={`status-badge ${selected.paymentStatus?.toLowerCase()}`}>{selected.paymentStatus}</span> — {selected.paymentMethod}</p>
+            <p><strong>Giao hàng:</strong> {selected.shippingMethod} — {selected.shippingAddress}</p>
+            {selected.note && <p><strong>Ghi chú:</strong> {selected.note}</p>}
+            <hr style={{ margin: '12px 0', borderColor: 'var(--ink-200)' }} />
+            <h4 style={{ marginBottom: 8 }}>Sản phẩm</h4>
+            {selected.items?.map((item, i) => (
+              <div key={i} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', fontSize: 14 }}>
+                <span>{item.productName} ({item.color}/{item.size}) × {item.quantity}</span>
+                <span>{formatMoney(item.lineTotal)}</span>
+              </div>
+            ))}
+            <div style={{ textAlign: 'right', marginTop: 8 }}><strong className="amount">{formatMoney(selected.total)}</strong></div>
+            {selected.history?.length > 0 && (
+              <>
+                <hr style={{ margin: '12px 0', borderColor: 'var(--ink-200)' }} />
+                <h4 style={{ marginBottom: 8 }}>Lịch sử</h4>
+                {selected.history.map((h, i) => (
+                  <p key={i} style={{ fontSize: 13, color: 'var(--ink-700)', marginBottom: 4 }}>
+                    {h.fromStatus} → <strong>{h.toStatus}</strong> · {h.changedBy} · {new Date(h.changedAt).toLocaleString('vi-VN')}
+                    {h.note && <em> — {h.note}</em>}
+                  </p>
+                ))}
+              </>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 16, flexWrap: 'wrap' }}>
+              {(ORDER_TRANSITIONS[selected.orderStatus] ?? []).map(next => (
+                <button key={next} type="button" className="button compact" disabled={busy === selected.id}
+                  onClick={() => changeStatus(selected.id, next)}>
+                  {busy === selected.id ? <Loader.Inline size={14} /> : `→ ${next}`}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </AdminLayout>
+  )
+}
+
+type MembershipCustomer = { id: string; fullName: string; email: string; membershipTier: string; totalSpent: number; createdAt: string }
+
+function AdminMembership() {
+  const [customers, setCustomers] = useState<MembershipCustomer[]>()
+  const [recalcBusy, setRecalcBusy] = useState(false)
+  const [toast, setToast] = useState('')
+
+  async function reload() {
+    const data = await api<MembershipCustomer[]>('/api/admin/membership/customers')
+    setCustomers(data)
+  }
+
+  useEffect(() => { reload() }, [])
+
+  async function recalculate() {
+    setRecalcBusy(true)
+    try {
+      await api('/api/admin/membership/recalculate', { method: 'POST' })
+      await reload()
+      setToast('Đã cập nhật hạng thành viên thành công.')
+      setTimeout(() => setToast(''), 3000)
+    } finally {
+      setRecalcBusy(false)
+    }
+  }
+
+  const TIER_ORDER: Record<string, number> = { Diamond: 4, Gold: 3, Silver: 2, Bronze: 1 }
+
+  return (
+    <AdminLayout>
+      <SectionTitle icon={<Crown />} title="Hạng thành viên" />
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+        <button type="button" className="button compact" disabled={recalcBusy} onClick={recalculate}>
+          {recalcBusy ? <Loader.Inline size={14} /> : 'Tính lại hạng'}
+        </button>
+        <span style={{ fontSize: 13, color: 'var(--ink-500)' }}>Bronze &lt; 2M · Silver 2M–10M · Gold 10M–30M · Diamond ≥ 30M</span>
+        {toast && <span style={{ color: 'var(--ink-700)', fontSize: 13 }}>✓ {toast}</span>}
       </div>
-    </article>
+      {!customers ? <Loader.Page /> : (
+        <div className="list">
+          {customers.sort((a, b) => (TIER_ORDER[b.membershipTier] ?? 0) - (TIER_ORDER[a.membershipTier] ?? 0)).map(c => (
+            <article key={c.id} className="card" style={{ padding: '12px 18px', display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+              <div style={{ flex: 1 }}>
+                <strong>{c.fullName || '(Chưa đặt tên)'}</strong>
+                <div style={{ fontSize: 13, color: 'var(--ink-500)' }}>{c.email}</div>
+              </div>
+              <span className={`status-badge tier-${c.membershipTier?.toLowerCase()}`}>{c.membershipTier}</span>
+              <strong className="amount">{formatMoney(c.totalSpent)}</strong>
+              <span style={{ fontSize: 12, color: 'var(--ink-500)' }}>{new Date(c.createdAt).toLocaleDateString('vi-VN')}</span>
+            </article>
+          ))}
+        </div>
+      )}
+    </AdminLayout>
   )
 }
 
@@ -2135,13 +2861,14 @@ function ChatWidget({ auth }: { auth: ReturnType<typeof useAuth> }) {
   const [content, setContent] = useState('')
 
   useEffect(() => {
-    api<Conversation[]>('/api/chat/conversations').then((rows) => {
+    const query = auth.user ? `?userId=${auth.user.id}` : `?guestToken=${guestToken}`
+    api<Conversation[]>(`/api/chat/conversations${query}`).then((rows) => {
       if (rows[0]) {
         setConversation(rows[0])
         api<ChatMessage[]>(`/api/chat/conversations/${rows[0].id}/messages`).then(setMessages)
       }
     })
-  }, [])
+  }, [auth.user])
 
   useEffect(() => {
     if (!conversation) return
@@ -2190,6 +2917,8 @@ function AdminLayout({ children }: { children: React.ReactNode }) {
   const links = [
     ['/admin', 'Dashboard'],
     ['/admin/products', 'Sản phẩm'],
+    ['/admin/orders', 'Đơn hàng'],
+    ['/admin/membership', 'Thành viên'],
     ['/admin/vouchers', 'Voucher'],
     ['/admin/staff', 'Staff'],
     ['/admin/chat', 'Chat'],

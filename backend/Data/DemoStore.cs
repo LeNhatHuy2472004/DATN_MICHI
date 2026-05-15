@@ -105,13 +105,13 @@ public sealed class DemoStore
                 subtotal - discount + shippingFee,
                 request.PaymentMethod,
                 request.PaymentMethod == "Cash" ? "Unpaid" : "Pending",
-                request.PaymentMethod == "Cash" ? "Confirmed" : "Pending",
+                "Pending",
                 request.ShippingMethod,
                 request.ShippingAddress,
                 request.VoucherCode,
                 request.Note,
                 DateTimeOffset.UtcNow,
-                [new StatusHistoryRecord("Created", request.PaymentMethod == "Cash" ? "Confirmed" : "Pending", "System", DateTimeOffset.UtcNow, "Tạo đơn hàng")]
+                [new StatusHistoryRecord("Created", "Pending", "System", DateTimeOffset.UtcNow, "Đơn hàng đặt thành công, chờ xác nhận")]
             );
 
             foreach (var item in cart.Items)
@@ -173,6 +173,7 @@ public sealed record GuestInfoRecord(string FullName, string PhoneNumber, string
 public sealed record CreateOrderRequest(Guid? UserId, string? GuestToken, GuestInfoRecord GuestInfo, string PaymentMethod, string ShippingMethod, string ShippingAddress, string? VoucherCode, decimal DiscountAmount, string? Note);
 public sealed record OrderRecord(Guid Id, string OrderCode, Guid? UserId, GuestInfoRecord GuestInfo, List<OrderItemRecord> Items, decimal Subtotal, decimal DiscountAmount, decimal ShippingFee, decimal Total, string PaymentMethod, string PaymentStatus, string OrderStatus, string ShippingMethod, string ShippingAddress, string? VoucherCode, string? Note, DateTimeOffset CreatedAt, List<StatusHistoryRecord> History)
 {
+    public string PaymentMethod { get; set; } = PaymentMethod;
     public string PaymentStatus { get; set; } = PaymentStatus;
     public string OrderStatus { get; set; } = OrderStatus;
 }

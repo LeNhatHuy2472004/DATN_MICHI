@@ -9,6 +9,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<CatalogProductVariantEntity> CatalogProductVariants => Set<CatalogProductVariantEntity>();
     public DbSet<VoucherEntity> Vouchers => Set<VoucherEntity>();
     public DbSet<UserEntity> Users => Set<UserEntity>();
+    public DbSet<AiTryOnImageEntity> AiTryOnImages => Set<AiTryOnImageEntity>();
     public DbSet<SeedMarkerEntity> SeedMarkers => Set<SeedMarkerEntity>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -91,6 +92,21 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.MembershipTier).HasMaxLength(40).IsRequired();
             entity.Property(x => x.TotalSpent).HasColumnType("decimal(18,2)");
             entity.HasIndex(x => x.Email).IsUnique();
+        });
+
+        modelBuilder.Entity<AiTryOnImageEntity>(entity =>
+        {
+            entity.ToTable("AiTryOnImages");
+            entity.HasKey(x => x.Id);
+            entity.Property(x => x.SourceImageUrl).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.ResultImageUrl).HasMaxLength(500).IsRequired();
+            entity.Property(x => x.ProductIdsCsv).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.ProductNamesCsv).HasMaxLength(1200).IsRequired();
+            entity.Property(x => x.ItemTypesCsv).HasMaxLength(400).IsRequired();
+            entity.Property(x => x.Note).HasMaxLength(1000).IsRequired();
+            entity.Property(x => x.Source).HasMaxLength(120).IsRequired();
+            entity.Property(x => x.Message).HasMaxLength(1200).IsRequired();
+            entity.HasIndex(x => new { x.UserId, x.CreatedAt });
         });
     }
 }
@@ -189,5 +205,21 @@ public sealed class UserEntity
     public bool IsActive { get; set; } = true;
     public string MembershipTier { get; set; } = "Bronze";
     public decimal TotalSpent { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}
+
+public sealed class AiTryOnImageEntity
+{
+    public Guid Id { get; set; }
+    public Guid UserId { get; set; }
+    public Guid? ParentId { get; set; }
+    public string SourceImageUrl { get; set; } = string.Empty;
+    public string ResultImageUrl { get; set; } = string.Empty;
+    public string ProductIdsCsv { get; set; } = string.Empty;
+    public string ProductNamesCsv { get; set; } = string.Empty;
+    public string ItemTypesCsv { get; set; } = string.Empty;
+    public string Note { get; set; } = string.Empty;
+    public string Source { get; set; } = string.Empty;
+    public string Message { get; set; } = string.Empty;
     public DateTimeOffset CreatedAt { get; set; }
 }

@@ -27,8 +27,10 @@ builder.Services.AddSingleton<DemoStore>();
 builder.Services.AddDbContext<AppDbContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
 builder.Services.AddSingleton<JwtTokenService>();
-builder.Services.AddHttpClient<GeminiService>();
-builder.Services.AddHostedService<MembershipTierJob>();
+builder.Services.AddSingleton<EmailOtpService>();
+builder.Services.AddHttpClient<OpenAiImageService>();
+builder.Services.AddSingleton<MembershipTierJob>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<MembershipTierJob>());
 builder.Services.AddHostedService<VoucherExpireJob>();
 builder.Services.AddControllers();
 builder.Services.AddSignalR();
@@ -52,7 +54,7 @@ builder.Services
 
 var app = builder.Build();
 
-// Canonical assets root (DATN_MICHI/assets) — used both by static-file middleware below
+// Canonical assets root (DATN_MICHI/assets) - used both by static-file middleware below
 // and by the seeder to read assets/seed/products/manifest.json on first run.
 var assetsRoot = Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "assets"));
 

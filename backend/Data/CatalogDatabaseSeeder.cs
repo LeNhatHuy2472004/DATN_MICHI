@@ -115,6 +115,26 @@ BEGIN
     );
     CREATE UNIQUE INDEX [IX_Users_Email] ON [Users] ([Email]);
 END;
+
+IF OBJECT_ID(N'[AiTryOnImages]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [AiTryOnImages] (
+        [Id] uniqueidentifier NOT NULL,
+        [UserId] uniqueidentifier NOT NULL,
+        [ParentId] uniqueidentifier NULL,
+        [SourceImageUrl] nvarchar(500) NOT NULL,
+        [ResultImageUrl] nvarchar(500) NOT NULL,
+        [ProductIdsCsv] nvarchar(1000) NOT NULL,
+        [ProductNamesCsv] nvarchar(1200) NOT NULL,
+        [ItemTypesCsv] nvarchar(400) NOT NULL,
+        [Note] nvarchar(1000) NOT NULL,
+        [Source] nvarchar(120) NOT NULL,
+        [Message] nvarchar(1200) NOT NULL,
+        [CreatedAt] datetimeoffset NOT NULL,
+        CONSTRAINT [PK_AiTryOnImages] PRIMARY KEY ([Id])
+    );
+    CREATE INDEX [IX_AiTryOnImages_UserId_CreatedAt] ON [AiTryOnImages] ([UserId], [CreatedAt]);
+END;
 """, cancellationToken);
     }
 
@@ -133,6 +153,16 @@ END;
 
     private static async Task SeedVouchersAsync(AppDbContext db, CancellationToken cancellationToken)
     {
+        // Idempotent fix: ensure ADDNEW voucher always has Scope=All so any Bronze user can apply it.
+        var addNew = await db.Vouchers.FirstOrDefaultAsync(x => x.Code == "ADDNEW" || x.Code == "ADONEW", cancellationToken);
+        if (addNew is not null && (addNew.Scope != "All" || addNew.CustomerId is not null))
+        {
+            addNew.Scope = "All";
+            addNew.ApplicableTier = "All";
+            addNew.CustomerId = null;
+            await db.SaveChangesAsync(cancellationToken);
+        }
+
         if (await db.Vouchers.AnyAsync(cancellationToken))
         {
             return;
@@ -140,6 +170,23 @@ END;
 
         var now = DateTimeOffset.UtcNow;
         db.Vouchers.AddRange(
+            new VoucherEntity
+            {
+                Id = Guid.NewGuid(),
+                Code = "ADDNEW",
+                Name = "Voucher người mới tạo tài khoản",
+                Type = "FixedAmount",
+                Value = 60000,
+                MaxDiscount = 60000,
+                MinOrderAmount = 150000,
+                Quantity = 500,
+                UsedCount = 0,
+                ApplicableTier = "All",
+                Scope = "All",
+                IsActive = true,
+                StartAt = now.AddDays(-1),
+                ExpireAt = now.AddMonths(6)
+            },
             new VoucherEntity
             {
                 Id = Guid.NewGuid(),
