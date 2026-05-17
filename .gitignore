@@ -163,6 +163,7 @@ ehthumbs.db
 # Secrets / credentials (DO NOT commit)
 # ============================================================
 **/secrets.json
+**/appsettings.json
 **/appsettings.*.local.json
 **/appsettings.Production.json
 

@@ -1019,7 +1019,19 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
             }
         }
 
-        await db.SaveChangesAsync();
+        try
+        {
+            await db.SaveChangesAsync();
+        }
+        catch (Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException)
+        {
+            // Product was deleted or modified by another request; reload and retry
+            db.ChangeTracker.Clear();
+            var reloaded = await db.CatalogProducts.Include(p => p.Variants).FirstOrDefaultAsync(p => p.Id == id);
+            if (reloaded is null) return NotFound(new ApiError("Sản phẩm không còn tồn tại."));
+            return Conflict(new ApiError("Sản phẩm đã bị sửa đổi bởi yêu cầu khác. Vui lòng tải lại và thử lại.", "product_modified"));
+        }
+
         await CatalogDatabaseSeeder.ReloadStoreAsync(db, store);
 
         var fresh = store.Products.First(p => p.Id == id);
@@ -1203,7 +1215,7 @@ public sealed class AdminController(DemoStore store, AppDbContext db, IConfigura
 
 [ApiController]
 [Route("api/ai")]
-public sealed class AiController(DemoStore store, AppDbContext db, ThienPlan.Api.Services.OpenAiImageService openAiImageService, IWebHostEnvironment env) : ControllerBase
+public sealed class AiController(DemoStore store, AppDbContext db, ThienPlan.Api.Services.GeminiImageAdapter geminiImageAdapter, IWebHostEnvironment env) : ControllerBase
 {
     [HttpPost("outfit-suggest")]
     public IActionResult Suggest(OutfitSuggestRequest request)
@@ -1354,7 +1366,7 @@ public sealed class AiController(DemoStore store, AppDbContext db, ThienPlan.Api
             return BadRequest(new ApiError("Vui lòng tải ảnh người mẫu/khách hàng hoặc chọn một ảnh cũ để chỉnh sửa.", "invalid_image"));
         }
 
-        var result = await openAiImageService.GenerateTryOnAsync(selectedProducts, productImagePaths.OfType<string>().ToList(), targetPath, tryOnRoot, note, HttpContext.RequestAborted);
+        var result = await geminiImageAdapter.GenerateTryOnAsync(selectedProducts, productImagePaths.OfType<string>().ToList(), targetPath, tryOnRoot, note, HttpContext.RequestAborted);
         if (string.IsNullOrWhiteSpace(result.ImageUrl))
         {
             return StatusCode(502, new ApiError(result.Message, result.Source));

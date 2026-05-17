@@ -29,6 +29,8 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 builder.Services.AddSingleton<JwtTokenService>();
 builder.Services.AddSingleton<EmailOtpService>();
 builder.Services.AddHttpClient<OpenAiImageService>();
+builder.Services.AddHttpClient<GeminiService>();
+builder.Services.AddScoped<GeminiImageAdapter>();
 builder.Services.AddSingleton<MembershipTierJob>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<MembershipTierJob>());
 builder.Services.AddHostedService<VoucherExpireJob>();
